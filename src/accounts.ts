@@ -1,7 +1,7 @@
-import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import type { HostState } from './hostState';
 
 /**
  * An account = a Claude Code data directory (CLAUDE_CONFIG_DIR) that has been
@@ -89,26 +89,26 @@ export function expandHome(p: string): string {
 /**
  * Mirror of the registry's directories, on disk.
  *
- * The uninstall hook runs as a bare `node` script with no vscode API, so
- * globalState — where the registry actually lives — is unreadable to it. Without
- * this list it could only guess which `~/.claude-*` dirs are ours, and the one
- * thing it must never do is delete a directory a user made for themselves. So
- * the registry writes down exactly what it manages, and uninstall deletes
- * nothing else.
+ * The uninstall hook runs as a bare `node` script, and the manifest is the one
+ * file its contract with this extension covers. Without this list it could only
+ * guess which `~/.claude-*` dirs are ours, and the one thing it must never do is
+ * delete a directory a user made for themselves. So the registry writes down
+ * exactly what it manages, and uninstall deletes nothing else.
  */
 function manifestPath(): string {
   return path.join(os.homedir(), '.claude-windows', '.manifest.json');
 }
 
 /**
- * The account registry is stored in globalState so every window (and every
- * VSCode profile) on this machine sees the same set of accounts.
+ * The account registry is stored in this host's HostState, so every window on
+ * this host sees the same set of accounts — and windows on another host, whose
+ * stores live on another disk, keep a list of their own (see hostState.ts).
  */
 export class AccountRegistry {
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  constructor(private readonly state: HostState) {}
 
   list(): Account[] {
-    return this.context.globalState.get<Account[]>(REGISTRY_KEY, []);
+    return this.state.get<Account[]>(REGISTRY_KEY, []);
   }
 
   /**
@@ -177,25 +177,25 @@ export class AccountRegistry {
     const list = this.list().filter((a) => a.name !== account.name);
     list.push(account);
     list.sort((a, b) => a.name.localeCompare(b.name));
-    await this.context.globalState.update(REGISTRY_KEY, list);
+    await this.state.update(REGISTRY_KEY, list);
     this.writeManifest();
   }
 
   async remove(name: string): Promise<void> {
     const list = this.list().filter((a) => a.name !== name);
-    await this.context.globalState.update(REGISTRY_KEY, list);
+    await this.state.update(REGISTRY_KEY, list);
     this.writeManifest();
   }
 
   /**
    * Drops entries whose store has been signed out — the account no longer exists.
    *
-   * This is what makes the account list agree across windows. `globalState` does
-   * NOT propagate between them: each extension host holds its own copy, so an
-   * account saved (or forgotten) in one window is invisible to the others until
-   * they restart. The DISK is the only shared truth — an account IS its store —
-   * so pairing this with discoverAndMerge() lets every window converge on it:
-   * new accounts appear, and signed-out ones disappear.
+   * An account IS its store, so the disk is the truth the registry must agree
+   * with: pairing this with discoverAndMerge() makes it converge on what is
+   * actually there — new accounts appear, and signed-out ones disappear.
+   *
+   * Only sound because the registry is per-host: against a registry shared with
+   * another host (as globalState is), this pruned every account of that host.
    */
   async pruneSignedOut(): Promise<Account[]> {
     const gone = this.list().filter((a) => !hasCredentials(a.dir));
@@ -204,7 +204,7 @@ export class AccountRegistry {
   }
 
   listForgotten(): Account[] {
-    return this.context.globalState.get<Account[]>(FORGOTTEN_KEY, []);
+    return this.state.get<Account[]>(FORGOTTEN_KEY, []);
   }
 
 
@@ -214,7 +214,7 @@ export class AccountRegistry {
     const norm = path.normalize(account.dir);
     const rest = this.listForgotten().filter((a) => path.normalize(a.dir) !== norm);
     rest.push(account);
-    await this.context.globalState.update(FORGOTTEN_KEY, rest);
+    await this.state.update(FORGOTTEN_KEY, rest);
     this.writeManifest();
   }
 
@@ -223,7 +223,7 @@ export class AccountRegistry {
     const list = this.listForgotten();
     const found = list.find((a) => (a.email ?? readIdentity(a.dir)?.email) === email);
     if (!found) return undefined;
-    await this.context.globalState.update(
+    await this.state.update(
       FORGOTTEN_KEY,
       list.filter((a) => a !== found)
     );

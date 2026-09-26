@@ -5,6 +5,7 @@ import { Account } from './accounts';
 import { materialize, windowWorkingDir } from './workdir';
 import { ensureSharedHistory } from './sharedHistory';
 import { log } from './log';
+import type { HostState } from './hostState';
 
 /**
  * Per-window binding of a Claude account.
@@ -21,7 +22,9 @@ import { log } from './log';
  * a different account simultaneously on a single WSL host.
  *
  * The active account for a window is remembered in workspaceState so it sticks
- * across reloads of the same workspace.
+ * across reloads of the same workspace. What is remembered across windows (the
+ * repo map, the last account) lives in this host's HostState: it names accounts
+ * and folders of this host only — see hostState.ts.
  */
 
 const ACTIVE_KEY = 'claudeProfiles.activeAccount';
@@ -35,7 +38,10 @@ export class WindowBinding {
   /** Fires whenever the active account for this window changes. */
   readonly onDidChange = new vscode.EventEmitter<void>();
 
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  constructor(
+    private readonly context: vscode.ExtensionContext,
+    private readonly state: HostState
+  ) {}
 
   /** Absolute path of this window's first workspace folder, if any. */
   private getRepoKey(): string | undefined {
@@ -43,7 +49,7 @@ export class WindowBinding {
   }
 
   private getRepoMap(): Record<string, string> {
-    return this.context.globalState.get<Record<string, string>>(REPO_MAP_KEY, {});
+    return this.state.get<Record<string, string>>(REPO_MAP_KEY, {});
   }
 
   /**
@@ -71,7 +77,7 @@ export class WindowBinding {
    * built around.
    */
   private getLastName(): string | undefined {
-    return this.context.globalState.get<string>(LAST_KEY);
+    return this.state.get<string>(LAST_KEY);
   }
 
   /**
@@ -95,12 +101,12 @@ export class WindowBinding {
       Object.entries(map).filter(([, v]) => v !== account.name)
     );
     if (Object.keys(filtered).length !== Object.keys(map).length) {
-      await this.context.globalState.update(REPO_MAP_KEY, filtered);
+      await this.state.update(REPO_MAP_KEY, filtered);
     }
     // And out of the "last used anywhere" default, or the next new window would
     // adopt the very account the user just signed out of.
     if (this.getLastName() === account.name) {
-      await this.context.globalState.update(LAST_KEY, undefined);
+      await this.state.update(LAST_KEY, undefined);
     }
     this.onDidChange.fire();
   }
@@ -122,7 +128,7 @@ export class WindowBinding {
       const map = { ...this.getRepoMap() };
       if (map[repo] !== undefined) {
         delete map[repo];
-        await this.context.globalState.update(REPO_MAP_KEY, map);
+        await this.state.update(REPO_MAP_KEY, map);
       }
     }
     delete process.env[ENV_VAR];
@@ -210,11 +216,11 @@ export class WindowBinding {
     process.env[ENV_VAR] = dir;
     this.applyTerminalEnv(dir);
     await this.context.workspaceState.update(ACTIVE_KEY, account.name);
-    await this.context.globalState.update(LAST_KEY, account.name);
+    await this.state.update(LAST_KEY, account.name);
     const repo = this.getRepoKey();
     if (repo) {
       const map = { ...this.getRepoMap(), [repo]: account.name };
-      await this.context.globalState.update(REPO_MAP_KEY, map);
+      await this.state.update(REPO_MAP_KEY, map);
     }
     this.onDidChange.fire();
   }

@@ -25,7 +25,9 @@ import { log } from './log';
 
 /**
  * A message to show AFTER a window reload. A reload kills any toast raised just
- * before it, so news that has to outlive one goes here.
+ * before it, so news that has to outlive one goes here. workspaceState, so the
+ * news reaches the window that reloaded — not whichever window, on whichever
+ * host, happens to activate next.
  */
 export const NOTICE_KEY = 'claudeProfiles.pendingNotice';
 
@@ -80,7 +82,7 @@ export class SetupWizard {
       return;
     }
     await this.context.workspaceState.update(RELOAD_STAMP_KEY, now);
-    if (notice) await this.context.globalState.update(NOTICE_KEY, notice);
+    if (notice) await this.context.workspaceState.update(NOTICE_KEY, notice);
     await vscode.commands.executeCommand('workbench.action.reloadWindow');
   }
 
@@ -209,11 +211,8 @@ export class SetupWizard {
   }
 
   private async reconcileOnce(opts: { atActivation?: boolean }): Promise<void> {
-    // Re-read the account list off disk first. `globalState` is per-extension-host,
-    // so an account saved or forgotten in ANOTHER window is invisible here until
-    // this one restarts — which is why a newly added account never showed up in the
-    // other window's Switch list. The stores on disk are the shared truth, so every
-    // window converges on them: discover what appeared, drop what was signed out.
+    // Bring the account list in line with the stores on disk — the truth every
+    // window on this host shares: discover what appeared, drop what was signed out.
     await this.registry.discoverAndMerge();
     await this.registry.pruneSignedOut();
 

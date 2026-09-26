@@ -95,6 +95,13 @@ export function materialize(account: Account, workingDir: string, force = false)
   const exists = fs.existsSync(workingDir);
   if (exists && !hasCredentials(workingDir) && !force) return false; // emptied by a logout
   if (hasCredentials(workingDir) && readIdentity(workingDir)?.email === account.email) return false;
+  // Nothing to copy. Creating the dir anyway would leave an EMPTY working dir —
+  // the exact fingerprint of a `/logout` above — and the next activation would
+  // treat this window as signed out of an account it never ran.
+  if (!hasCredentials(account.dir)) {
+    log(`workdir: ${account.name} has no token in ${account.dir} — not stocking ${workingDir}`);
+    return false;
+  }
   try {
     fs.mkdirSync(workingDir, { recursive: true, mode: 0o700 });
     copyFile(path.join(account.dir, '.credentials.json'), path.join(workingDir, '.credentials.json'));

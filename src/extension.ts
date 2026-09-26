@@ -9,6 +9,7 @@ import { SetupWizard, NOTICE_KEY } from './setupWizard';
 import { ensureSharedHistory } from './sharedHistory';
 import { defaultSourceDir } from './capture';
 import { AccountWatcher } from './accountWatcher';
+import { HostState } from './hostState';
 import { allWorkingDirs, workingRoot } from './workdir';
 import { log, showLog } from './log';
 
@@ -70,8 +71,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return;
   }
 
-  const registry = new AccountRegistry(context);
-  const binding = new WindowBinding(context);
+  // Accounts, the repo map and the last-used account describe THIS host's disk,
+  // so they live on it — not in globalState, which VSCode shares across every
+  // remote host this editor connects to (see hostState.ts). Adopting the old
+  // globalState copy is synchronous: applyStored() below needs it in place.
+  const state = new HostState();
+  state.migrateFrom(context.globalState);
+  const registry = new AccountRegistry(state);
+  const binding = new WindowBinding(context, state);
   const wizard = new SetupWizard(registry, binding, context);
   const statusBar = new StatusBarManager(registry, binding);
 
@@ -237,9 +244,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // An account handoff finishes with a reload, which kills any toast raised
   // before it — so the news of what happened is delivered here instead.
-  const notice = context.globalState.get<string>(NOTICE_KEY);
+  const notice = context.workspaceState.get<string>(NOTICE_KEY);
   if (notice) {
-    await context.globalState.update(NOTICE_KEY, undefined);
+    await context.workspaceState.update(NOTICE_KEY, undefined);
     // A notice typically reports an account handoff. If this window came out of
     // it with NO account while saved ones exist (forget reloaded it into limbo),
     // the news must come with the way out attached, not read as a dead end.
