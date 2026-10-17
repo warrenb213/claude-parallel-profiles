@@ -339,6 +339,11 @@ export function removeStrayLinks(): void {
   }
 }
 
+/** The port the provider's proxy was last started on, on this host. */
+export function proxyPort(providerId: string): number | undefined {
+  return readState(path.join(root(), providerId))?.port;
+}
+
 export function proxyLogFile(providerId: string): string {
   return path.join(root(), providerId, 'litellm.log');
 }

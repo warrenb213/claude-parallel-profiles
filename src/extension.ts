@@ -85,7 +85,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const registry = new AccountRegistry(state);
   const binding = new WindowBinding(context, state);
   const wizard = new SetupWizard(registry, binding, context);
-  const providers = new ProviderManager(context, binding);
+  const providers = new ProviderManager(context, binding, state);
   const statusBar = new StatusBarManager(registry, binding, providers);
 
   // A forgotten account no longer resolves, so a window that remembered one
@@ -258,7 +258,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // Not part of the activation race: settings.json is read by each `claude` when
   // it starts, and it already carries the provider written at the last switch.
-  void providers.sync();
+  void providers.migrate().then(() => providers.sync());
   providers.warnAboutSharedOverride();
 
   // An account handoff finishes with a reload, which kills any toast raised

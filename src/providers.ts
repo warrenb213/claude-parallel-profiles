@@ -3,10 +3,13 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { WindowBinding } from './binding';
+import { HostState } from './hostState';
+import { readIdentity } from './accounts';
+import { allWorkingDirs, workingRoot } from './workdir';
 import { NOTICE_KEY } from './setupWizard';
 import { log } from './log';
 import { CatalogModel, Family, FAMILIES, fetchCatalog, modelSettings, newest, OtherModel, toAnthropic } from './modelCatalog';
-import { ensureProxy, install, isInstalled, ProxyHandle, proxyConfig, proxyLogFile, stopProxy } from './litellm';
+import { ensureProxy, install, isInstalled, ProxyHandle, proxyConfig, proxyLogFile, proxyPort, stopProxy } from './litellm';
 
 /**
  * Billing providers: WHERE a window's requests go and WHO pays for them, kept
@@ -35,12 +38,14 @@ import { ensureProxy, install, isInstalled, ProxyHandle, proxyConfig, proxyLogFi
  *
  * Where things are kept
  * ─────────────────────
- * Definitions in globalState, keys in SecretStorage — both on the CLIENT, so
- * shared by every remote host this editor reaches. That is deliberate, and the
- * opposite of accounts (see hostState.ts): an account is a store on one host's
- * disk, but a gateway key works from anywhere, so it is entered once. The
- * per-window choice is in workspaceState, and the settings.json carries a copy
- * of the key next to the OAuth token the same dir already holds (0600).
+ * A provider belongs to one ACCOUNT on one HOST: definitions in this host's
+ * state file (hostState.ts), under the account's email, so a window sees only
+ * the providers of the account it runs, here. Keys are in SecretStorage, which
+ * lives on the CLIENT and is shared by every host — so each key's name carries
+ * this host's id. (Up to 1.7 both were client-wide, shared by every host and
+ * account; migrate() splits them up.) The per-window choice is in
+ * workspaceState, and the settings.json carries a copy of the key next to the
+ * OAuth token the same dir already holds (0600).
  *
  * Models
  * ──────
@@ -70,16 +75,19 @@ export interface Provider {
   extraModels?: string[];
   /** For gateways that reject Anthropic's experimental `anthropic-beta` headers. */
   disableBetas?: boolean;
+  /** The shared (≤ 1.7) provider this one was adopted from, when its id changed — windows may still name it. */
+  legacyId?: string;
 }
 
-const PROVIDERS_KEY = 'claudeProfiles.providers';
+/** Where versions up to 1.7 kept every provider: globalState, shared by every host and account. */
+const LEGACY_PROVIDERS_KEY = 'claudeProfiles.providers';
 const ACTIVE_KEY = 'claudeProfiles.activeProvider';
 const HIDE_OVERRIDE_WARNING_KEY = 'claudeProfiles.hideProviderOverrideWarning';
 /** workspaceState: the window's own values of MANAGED_TOP, saved when a provider took them over. */
 const STASH_KEY = 'claudeProfiles.providerStash';
 /** How old a catalog may get before a window using the provider re-reads it. */
 const CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
-const secretKey = (id: string) => `claudeProfiles.provider.${id}`;
+const legacySecretKey = (id: string) => `claudeProfiles.provider.${id}`;
 const ANTHROPIC_API = 'https://api.anthropic.com';
 const isNative = (p: Provider) => p.kind === 'anthropic';
 
@@ -249,20 +257,121 @@ export class ProviderManager implements vscode.Disposable {
 
   constructor(
     private readonly context: vscode.ExtensionContext,
-    private readonly binding: WindowBinding
+    private readonly binding: WindowBinding,
+    private readonly state: HostState
   ) {}
 
-  list(): Provider[] {
-    return this.context.globalState.get<Provider[]>(PROVIDERS_KEY, []);
+  /** The account this window runs — providers belong to it, on this host. */
+  private email(): string | undefined {
+    const dir = this.binding.getEnvDir();
+    return dir ? readIdentity(dir)?.email : undefined;
   }
 
+  /** This account's providers on this host. */
+  list(): Provider[] {
+    const email = this.email();
+    if (!email) return [];
+    return this.state.get<Record<string, Provider[]>>('claudeProfiles.providers', {})[email] ?? [];
+  }
+
+  /** By id — or by the shared provider's id it was adopted from, which a window may still hold. */
   private get(id: string): Provider | undefined {
-    return this.list().find((p) => p.id === id);
+    const list = this.list();
+    return list.find((p) => p.id === id) ?? list.find((p) => p.legacyId === id);
   }
 
   private async save(list: Provider[]): Promise<void> {
+    const email = this.email();
+    if (!email) throw new Error('This window has no signed-in account — providers belong to an account.');
     list.sort((a, b) => a.name.localeCompare(b.name));
-    await this.context.globalState.update(PROVIDERS_KEY, list);
+    const all = this.state.get<Record<string, Provider[]>>('claudeProfiles.providers', {});
+    if (list.length > 0) all[email] = list;
+    else delete all[email];
+    await this.state.update('claudeProfiles.providers', all);
+  }
+
+  /**
+   * Where a provider's key lives in the client's secret storage. SecretStorage is
+   * on the CLIENT, shared by every host, so the name carries this host's id: the
+   * same provider id on two hosts never shares — or deletes — the other's key.
+   */
+  private secretKey(id: string): string {
+    let host = this.state.get<string>('claudeProfiles.hostId');
+    if (!host) {
+      host = crypto.randomBytes(6).toString('hex');
+      void this.state.update('claudeProfiles.hostId', host);
+    }
+    return `claudeProfiles.provider.${host}.${id}`;
+  }
+
+  /**
+   * One-time, per host: adopt the providers versions up to 1.7 kept in
+   * globalState, which every host and every account shared.
+   *
+   * A provider goes to each account that has a window on THIS host using it right
+   * now — its key in the window's settings.json, or its local proxy's port —
+   * and to no one else. The first account keeps its id (the running proxy and
+   * the windows' settings stay valid); another account on the same host gets a
+   * new id, so their proxies can't collide. Each copy gets its own key entry.
+   *
+   * globalState and the old key entries are left alone: hosts still on an older
+   * version read them, and other hosts adopt from them when they update.
+   */
+  async migrate(): Promise<void> {
+    if (this.state.get<boolean>('claudeProfiles.providersMigrated')) return;
+    const legacy = this.context.globalState.get<Provider[]>(LEGACY_PROVIDERS_KEY, []);
+    // Several windows may activate at once: one adopts, the others wait for it.
+    const lock = path.join(workingRoot(), '.providers-migration.lock');
+    try {
+      fs.mkdirSync(workingRoot(), { recursive: true, mode: 0o700 });
+      fs.closeSync(fs.openSync(lock, 'wx', 0o600));
+    } catch {
+      // Another window is adopting. A lock older than a minute was left by one
+      // that died: clear it so the next activation retries.
+      try {
+        if (Date.now() - fs.statSync(lock).mtimeMs > 60_000) fs.rmSync(lock, { force: true });
+      } catch {
+        /* released meanwhile */
+      }
+      return;
+    }
+    try {
+      const all = this.state.get<Record<string, Provider[]>>('claudeProfiles.providers', {});
+      const used = new Set<string>(); // legacy ids already adopted on this host
+      for (const p of legacy) {
+        const key = await this.context.secrets.get(legacySecretKey(p.id));
+        if (!key) continue;
+        const port = proxyPort(p.id);
+        const owners = new Map<string, boolean>(); // email → uses the running proxy
+        for (const dir of allWorkingDirs()) {
+          let env: Record<string, string> = {};
+          try {
+            env = (JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf-8')).env ?? {}) as Record<string, string>;
+          } catch {
+            continue;
+          }
+          const direct = env.ANTHROPIC_AUTH_TOKEN === key || env.ANTHROPIC_API_KEY === key;
+          const proxied = port !== undefined && env.ANTHROPIC_BASE_URL === `http://127.0.0.1:${port}`;
+          const email = readIdentity(dir)?.email;
+          if ((direct || proxied) && email) owners.set(email, (owners.get(email) ?? false) || proxied);
+        }
+        // The account on the running proxy keeps the id, so its windows stay as they are.
+        for (const email of [...owners.keys()].sort((a, b) => Number(owners.get(b)) - Number(owners.get(a)))) {
+          const copy: Provider = used.has(p.id)
+            ? { ...p, id: crypto.randomBytes(6).toString('hex'), legacyId: p.id }
+            : { ...p };
+          used.add(p.id);
+          await this.context.secrets.store(this.secretKey(copy.id), key);
+          all[email] = [...(all[email] ?? []).filter((q) => q.id !== copy.id), copy];
+          log(`provider ${p.name}: adopted on this host for ${email}${copy.legacyId ? ` as ${copy.id}` : ''}`);
+        }
+        if (owners.size === 0) log(`provider ${p.name}: not in use on this host — not adopted here`);
+      }
+      await this.state.update('claudeProfiles.providers', all);
+      await this.state.update('claudeProfiles.providersMigrated', true);
+    } finally {
+      fs.rmSync(lock, { force: true });
+    }
   }
 
   /** The provider this window bills to; undefined = its Anthropic login. */
@@ -403,7 +512,7 @@ export class ProviderManager implements vscode.Disposable {
   private async useInWindow(provider: Provider | undefined): Promise<void> {
     let desired: ProviderSettings | undefined;
     if (provider) {
-      const key = await this.context.secrets.get(secretKey(provider.id));
+      const key = await this.context.secrets.get(this.secretKey(provider.id));
       if (!key) throw new Error(`No key is stored for ${provider.name}. Edit the provider and set its key.`);
       provider = await this.refreshCatalog(provider, key);
       desired = settingsFor(provider, key, await this.proxyFor(provider, key, true));
@@ -430,10 +539,14 @@ export class ProviderManager implements vscode.Disposable {
    * offers the reload, so this can't become a loop.
    */
   async sync(): Promise<void> {
+    // Until this host has adopted the shared providers, a window's provider can't
+    // be found yet — acting now would reset it to the Anthropic login.
+    if (!this.state.get<boolean>('claudeProfiles.providersMigrated')) return;
     const id = this.context.workspaceState.get<string>(ACTIVE_KEY);
     if (!id || !this.settingsFile()) return;
     let provider = this.get(id);
-    const key = provider ? await this.context.secrets.get(secretKey(provider.id)) : undefined;
+    if (provider && provider.id !== id) await this.context.workspaceState.update(ACTIVE_KEY, provider.id);
+    const key = provider ? await this.context.secrets.get(this.secretKey(provider.id)) : undefined;
     if (provider && key) provider = await this.refreshCatalog(provider, key);
     let changed: boolean;
     try {
@@ -598,7 +711,7 @@ export class ProviderManager implements vscode.Disposable {
       baseUrl: baseUrl.trim().replace(/\/+$/, ''),
       auth,
     };
-    await this.context.secrets.store(secretKey(provider.id), key.trim());
+    await this.context.secrets.store(this.secretKey(provider.id), key.trim());
     await this.save([...this.list(), provider]);
     log(`provider added: ${provider.name} (${provider.baseUrl}, ${provider.auth})`);
 
@@ -656,7 +769,7 @@ export class ProviderManager implements vscode.Disposable {
       baseUrl: ANTHROPIC_API,
       auth: 'x-api-key',
     };
-    await this.context.secrets.store(secretKey(provider.id), key.trim());
+    await this.context.secrets.store(this.secretKey(provider.id), key.trim());
     await this.save([...this.list(), provider]);
     log(`provider added: ${provider.name} (Anthropic API key)`);
     const canUse = Boolean(this.settingsFile());
@@ -806,7 +919,7 @@ export class ProviderManager implements vscode.Disposable {
             : (v) => (v.trim() ? undefined : 'Enter the key'),
         });
         if (!key) return;
-        await this.context.secrets.store(secretKey(target.id), key.trim());
+        await this.context.secrets.store(this.secretKey(target.id), key.trim());
         break;
       }
       case 'url': {
@@ -895,7 +1008,7 @@ export class ProviderManager implements vscode.Disposable {
         return;
       }
       case 'refresh': {
-        const key = await this.context.secrets.get(secretKey(target.id));
+        const key = await this.context.secrets.get(this.secretKey(target.id));
         if (!key) throw new Error(`No key is stored for ${target.name}. Replace its key first.`);
         const fresh = await vscode.window.withProgress(
           { location: vscode.ProgressLocation.Notification, title: `Reading ${target.name}'s model list…` },
@@ -931,7 +1044,7 @@ export class ProviderManager implements vscode.Disposable {
         );
         if (ok !== 'Remove') return;
         await this.save(this.list().filter((p) => p.id !== target.id));
-        await this.context.secrets.delete(secretKey(target.id));
+        await this.context.secrets.delete(this.secretKey(target.id));
         await stopProxy(target.id);
         log(`provider removed: ${target.name}`);
         // This window used it: back to the Anthropic login now. Other windows find
@@ -950,7 +1063,7 @@ export class ProviderManager implements vscode.Disposable {
     // Turning other models on is the moment to install and start the proxy — the
     // background sync below never installs anything on its own.
     if (action === 'others' && updated.extraModels?.length) {
-      const key = await this.context.secrets.get(secretKey(updated.id));
+      const key = await this.context.secrets.get(this.secretKey(updated.id));
       if (key && !(await this.proxyFor(updated, key, true))) {
         vscode.window.showInformationMessage(
           `${updated.name}'s non-Claude models stay off until LiteLLM is installed — its Claude models keep working.`

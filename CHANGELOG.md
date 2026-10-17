@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.8.0 — 2026-10-17
+
+### Changed
+
+- **Providers belong to one account on one host.** Up to 1.7 a provider — its definition, key and enabled non-Claude models — was kept on the VS Code client and shared by every remote host and every Claude account. Now a window sees only the providers of the account it runs, on its own host. On first start each host adopts the old shared providers for the accounts that have a window using them there right now (by key, or by the local proxy's port), and for no one else; other accounts add their own. The account on a running proxy keeps the provider's id, so its windows don't change.
+
+### Fixed
+
+- The LiteLLM proxy's folder (`~/.claude-windows/litellm`) was taken for a window's working folder, and shared-history links were created inside it. Only real window folders are considered now, and the stray links are removed on start (links only — no history is touched).
+- *Show proxy log* on a host where the proxy never ran explains that, instead of an error.
+
 ## 1.7.1 — 2026-10-17
 
 ### Fixed

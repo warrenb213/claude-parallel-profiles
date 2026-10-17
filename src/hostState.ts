@@ -31,6 +31,12 @@ const KEYS = [
   'claudeProfiles.forgottenAccounts',
   'claudeProfiles.lastAccount',
   'claudeProfiles.repoAccounts',
+  /** Providers by account email — see providers.ts. */
+  'claudeProfiles.providers',
+  /** Set once this host adopted the providers older versions kept in globalState. */
+  'claudeProfiles.providersMigrated',
+  /** A random id for this host, naming its provider keys in the client's secret storage. */
+  'claudeProfiles.hostId',
 ] as const;
 export type HostStateKey = (typeof KEYS)[number];
 
