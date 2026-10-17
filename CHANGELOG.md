@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.7.1 — 2026-10-17
+
+### Fixed
+
+- **"Non-Claude models: 0 available" after *Refresh model list*.** The refresh read the gateway's non-Claude models, then the edit menu saved its own copy of the provider over them, keeping only the Claude list.
+- A provider whose model list was read by 1.5 or earlier (no non-Claude list at all) is now re-read on next use, instead of waiting up to a day.
+
 ## 1.7.0 — 2026-10-17
 
 ### Added

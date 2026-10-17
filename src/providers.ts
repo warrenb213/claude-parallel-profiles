@@ -342,7 +342,9 @@ export class ProviderManager implements vscode.Disposable {
    */
   private async refreshCatalog(provider: Provider, key: string, force = false): Promise<Provider> {
     if (isNative(provider)) return provider; // Claude Code knows Anthropic's own models
-    if (!force && provider.catalogAt && Date.now() - provider.catalogAt < CATALOG_TTL_MS) return provider;
+    // A list read before non-Claude models existed (≤ 1.5) has no otherCatalog: re-read it now.
+    const fresh = provider.catalogAt && Date.now() - provider.catalogAt < CATALOG_TTL_MS && provider.otherCatalog;
+    if (!force && fresh) return provider;
     try {
       const { claude: catalog, others } = await fetchCatalog(provider.baseUrl, provider.auth, key);
       const updated: Provider = { ...provider, catalog, otherCatalog: others, catalogAt: Date.now() };
@@ -892,7 +894,7 @@ export class ProviderManager implements vscode.Disposable {
           { location: vscode.ProgressLocation.Notification, title: `Reading ${target.name}'s model list…` },
           () => this.refreshCatalog(target, key, true)
         );
-        Object.assign(updated, { catalog: fresh.catalog, catalogAt: fresh.catalogAt });
+        Object.assign(updated, { catalog: fresh.catalog, otherCatalog: fresh.otherCatalog, catalogAt: fresh.catalogAt });
         break;
       }
       case 'betas':
