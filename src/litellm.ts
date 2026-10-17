@@ -257,7 +257,9 @@ function readState(dir: string): ProxyState | undefined {
 export async function ensureProxy(
   providerId: string,
   config: object,
-  gatewayKey: string
+  gatewayKey: string,
+  /** The schema_fix.py this extension version ships — copied next to the config, which loads it. */
+  hookFile: string
 ): Promise<ProxyHandle> {
   const dir = path.join(root(), providerId);
   return withLock(path.join(dir, 'start.lock'), 3 * 60_000, async () => {
@@ -265,7 +267,9 @@ export async function ensureProxy(
     // JSON is valid YAML, which is what LiteLLM reads.
     const configText = JSON.stringify(config, null, 2);
     const configFile = path.join(dir, 'config.yaml');
-    const hash = sha256(`${configText}\0${sha256(gatewayKey)}`);
+    const hook = fs.readFileSync(hookFile);
+    // The hook is part of what runs: a new version of it restarts the proxy too.
+    const hash = sha256(`${configText}\0${sha256(gatewayKey)}\0${sha256(hook)}`);
     const state = readState(dir);
     if (state && state.hash === hash && isOurProxy(state.pid) && (await healthy(state.port))) {
       return { port: state.port, masterKey: state.masterKey };
@@ -273,6 +277,7 @@ export async function ensureProxy(
     if (state) await stopPid(state.pid);
 
     fs.writeFileSync(configFile, configText, { mode: 0o600 });
+    fs.writeFileSync(path.join(dir, 'schema_fix.py'), hook, { mode: 0o600 });
     const masterKey = state?.masterKey ?? `sk-local-${crypto.randomBytes(24).toString('hex')}`;
     const port = state?.port && (await portFree(state.port)) ? state.port : await freePort();
     const logFile = path.join(dir, 'litellm.log');
@@ -384,6 +389,12 @@ export function proxyConfig(
       ...otherIds.map((id) => ({ model_name: id, litellm_params: { model: `openai/${id}`, ...api } })),
     ],
     general_settings: { master_key: 'os.environ/LITELLM_MASTER_KEY' },
-    litellm_settings: { drop_params: true, use_chat_completions_url_for_anthropic_messages: true },
+    litellm_settings: {
+      drop_params: true,
+      use_chat_completions_url_for_anthropic_messages: true,
+      // schema_fix.py, next to this file: rewrites tool-schema keywords that
+      // OpenAI-format backends reject (Poe: "Failed to parse tool definition").
+      callbacks: ['schema_fix.proxy_handler_instance'],
+    },
   };
 }

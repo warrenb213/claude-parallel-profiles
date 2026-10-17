@@ -91,6 +91,12 @@ const legacySecretKey = (id: string) => `claudeProfiles.provider.${id}`;
 const ANTHROPIC_API = 'https://api.anthropic.com';
 const isNative = (p: Provider) => p.kind === 'anthropic';
 
+/** A model Anthropic serves: an alias (opus, sonnet[1m], default…) or a Claude ID. */
+function isClaudeModel(model: string): boolean {
+  const m = model.trim().replace(/\[1m\]$/i, '');
+  return /^(default|best|opusplan|opus|sonnet|haiku|fable)$/i.test(m) || /^claude-/i.test(m) || Boolean(toAnthropic(m));
+}
+
 /**
  * What a window's own Anthropic login is, read from its files: "Team plan ·
  * Acme", "Max plan", "Console API key". Not from `claude auth status`, which
@@ -435,6 +441,13 @@ export class ProviderManager implements vscode.Disposable {
       await this.context.workspaceState.update(STASH_KEY, undefined);
     }
 
+    // Going to Anthropic (the login or an API key): a default model only a gateway
+    // serves — `/model` → glm-5.3, saved by Claude Code — would be sent to
+    // Anthropic and fail. Claude aliases and IDs stay.
+    if ((!desired || desired.keepTop) && typeof settings.model === 'string' && !isClaudeModel(settings.model)) {
+      log(`provider: dropped default model "${settings.model}", which Anthropic doesn't serve`);
+      delete settings.model;
+    }
     if (desired?.env.ANTHROPIC_API_KEY) approveApiKey(path.dirname(file), desired.env.ANTHROPIC_API_KEY);
     if (JSON.stringify(settings) === before) return false;
     const tmp = `${file}.${process.pid}.tmp`;
@@ -503,9 +516,9 @@ export class ProviderManager implements vscode.Disposable {
     return interactive
       ? vscode.window.withProgress(
           { location: vscode.ProgressLocation.Notification, title: `Starting the local proxy for ${p.name}…` },
-          () => ensureProxy(p.id, config, key)
+          () => ensureProxy(p.id, config, key, path.join(this.context.extensionPath, 'litellm', 'schema_fix.py'))
         )
-      : ensureProxy(p.id, config, key);
+      : ensureProxy(p.id, config, key, path.join(this.context.extensionPath, 'litellm', 'schema_fix.py'));
   }
 
   /** Points this window at `provider` (undefined = its Anthropic login) and reloads it. */
@@ -529,7 +542,11 @@ export class ProviderManager implements vscode.Disposable {
         ? `This window now bills to ${provider.name}. Your Anthropic login stays saved — switch back any time from the status bar.`
         : `This window is back on its Anthropic login (${describeLogin(this.binding.getEnvDir())}).`
     );
-    await vscode.commands.executeCommand('workbench.action.reloadWindow');
+    try {
+      await vscode.commands.executeCommand('workbench.action.reloadWindow');
+    } catch {
+      /* the reload tears this command down mid-call ("Canceled") — that IS the success */
+    }
   }
 
   /**

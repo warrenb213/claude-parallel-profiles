@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.8.1 — 2026-10-17
+
+### Fixed
+
+- **Non-Claude models hung on every request.** Poe's GLM and Qwen reject one of Claude Code's own tool schemas (`ArtifactData` uses JSON Schema's `prefixItems`) with "Failed to parse tool definition"; LiteLLM answered 500 and Claude Code kept retrying, which looked like a hang. The proxy now loads a small pre-call hook (`litellm/schema_fix.py`, shipped with the extension) that rewrites such keywords for translated models only; Claude models pass through untouched. A new version of the hook restarts the proxy.
+- **Switching back to Anthropic left a gateway-only default model behind.** Picking e.g. `glm-5.3` as the default in `/model` saves it in the window's settings; going back to the Anthropic login or an API key now removes it (Claude aliases and IDs stay), instead of sending `glm-5.3` to Anthropic.
+- The window reload after switching provider no longer logs a "Canceled" error.
+
 ## 1.8.0 — 2026-10-17
 
 ### Changed
