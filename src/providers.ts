@@ -318,7 +318,7 @@ export class ProviderManager implements vscode.Disposable {
         () => install(this.lockFile())
       );
     }
-    const config = proxyConfig(p.baseUrl, claudeGatewayIds(p), p.extraModels);
+    const config = proxyConfig(p.baseUrl, p.auth, claudeGatewayIds(p), p.extraModels);
     return interactive
       ? vscode.window.withProgress(
           { location: vscode.ProgressLocation.Notification, title: `Starting the local proxy for ${p.name}…` },

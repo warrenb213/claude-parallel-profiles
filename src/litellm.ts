@@ -329,10 +329,24 @@ function openAiBase(baseUrl: string): string {
 /**
  * LiteLLM's config: Claude models passed through, the others translated. Model
  * names are the gateway's own — what Claude Code sends once modelOverrides mapped
- * the Anthropic IDs. LiteLLM sends the gateway key as a Bearer token.
+ * the Anthropic IDs.
+ *
+ * Auth: `api_key` makes LiteLLM send a Bearer token. For an x-api-key gateway the
+ * key also goes in `extra_headers` (not `headers`: the /v1/messages passthrough
+ * reads only `extra_headers`); the passthrough then sends x-api-key alone, and
+ * translated calls send both, since the OpenAI client always adds Bearer.
  */
-export function proxyConfig(baseUrl: string, claudeIds: string[], otherIds: string[]): object {
-  const api = { api_base: openAiBase(baseUrl), api_key: 'os.environ/PROVIDER_KEY' };
+export function proxyConfig(
+  baseUrl: string,
+  auth: 'bearer' | 'x-api-key',
+  claudeIds: string[],
+  otherIds: string[]
+): object {
+  const api = {
+    api_base: openAiBase(baseUrl),
+    api_key: 'os.environ/PROVIDER_KEY',
+    ...(auth === 'x-api-key' && { extra_headers: { 'x-api-key': 'os.environ/PROVIDER_KEY' } }),
+  };
   return {
     model_list: [
       ...claudeIds.map((id) => ({

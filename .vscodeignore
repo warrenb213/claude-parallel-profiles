@@ -10,3 +10,5 @@ images/icon.svg
 .gitignore
 .vscodeignore
 .markdownlint.json
+.claude/
+*.vsix
