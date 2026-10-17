@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.7.0 — 2026-10-17
+
+### Added
+
+- **Anthropic API key as a provider.** *Add a Provider → Anthropic API key* takes a key from console.anthropic.com and sends the window's requests straight to Anthropic, billed per token — no base URL, model rewriting or proxy, and Claude Code's usual model lineup. The account's own login stays saved for switching back.
+- **API keys are pre-approved for Claude Code.** Any provider that sets `ANTHROPIC_API_KEY` (an Anthropic key, or an `x-api-key` gateway) is recorded as approved in the window's `.claude.json`, so Claude Code's "Detected a custom API key" prompt — whose default answer, *No*, silently fell back to the login — no longer appears. An earlier *No* for the same key is undone.
+
+### Changed
+
+- **"Subscription" is now "Anthropic"** — the default for every window, labelled with what the account's login actually is: *Team plan · Acme*, *Max plan*, *Console API key*. It is read from the account's files, so it stays right while a provider overrides the login.
+
 ## 1.6.0 — 2026-10-17
 
 ### Added

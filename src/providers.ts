@@ -12,7 +12,9 @@ import { ensureProxy, install, isInstalled, ProxyHandle, proxyConfig, proxyLogFi
  * Billing providers: WHERE a window's requests go and WHO pays for them, kept
  * apart from the ACCOUNT (identity, history, settings, project trust).
  *
- * "Subscription" is the window's own Anthropic login. Any other provider is an
+ * "Anthropic" — the default — is the window's own Anthropic login: a claude.ai
+ * plan (Pro, Max, Team, Enterprise) or a Console key from /login. A provider is
+ * either an Anthropic API key (native, no base URL or model rewriting) or an
  * Anthropic-compatible gateway — Poe, a company proxy — reached with a base URL
  * and a key. Claude Code ranks ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY above a
  * saved /login, and the login "stays saved and unused while the variable is set"
@@ -51,6 +53,8 @@ import { ensureProxy, install, isInstalled, ProxyHandle, proxyConfig, proxyLogFi
 export interface Provider {
   id: string;
   name: string;
+  /** 'anthropic': an Anthropic API key, sent straight to Anthropic. Unset: a gateway. */
+  kind?: 'anthropic';
   baseUrl: string;
   /** How the gateway takes its key: `Authorization: Bearer` or `x-api-key`. */
   auth: 'bearer' | 'x-api-key';
@@ -76,10 +80,67 @@ const STASH_KEY = 'claudeProfiles.providerStash';
 /** How old a catalog may get before a window using the provider re-reads it. */
 const CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 const secretKey = (id: string) => `claudeProfiles.provider.${id}`;
+const ANTHROPIC_API = 'https://api.anthropic.com';
+const isNative = (p: Provider) => p.kind === 'anthropic';
+
+/**
+ * What a window's own Anthropic login is, read from its files: "Team plan ·
+ * Acme", "Max plan", "Console API key". Not from `claude auth status`, which
+ * reports the provider's key instead while one is active.
+ */
+export function describeLogin(dir: string | undefined): string {
+  if (!dir) return 'Anthropic login';
+  const read = (f: string): Record<string, unknown> => {
+    try {
+      return JSON.parse(fs.readFileSync(path.join(dir, f), 'utf-8')) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  };
+  const config = read('.claude.json');
+  const plan = (read('.credentials.json').claudeAiOauth as { subscriptionType?: unknown } | undefined)
+    ?.subscriptionType;
+  if (typeof plan === 'string' && plan) {
+    const org = (config.oauthAccount as { organizationName?: unknown } | undefined)?.organizationName;
+    const name = `${plan[0].toUpperCase()}${plan.slice(1)} plan`;
+    return plan !== 'pro' && plan !== 'max' && typeof org === 'string' && org ? `${name} · ${org}` : name;
+  }
+  if (config.primaryApiKey) return 'Console API key (/login), billed per token';
+  return 'Anthropic login';
+}
+
+/**
+ * Claude Code asks before using an ANTHROPIC_API_KEY it hasn't seen ("Detected a
+ * custom API key"), defaulting to No — and a No silently falls back to the
+ * login. The user already chose this key here, so it is approved the way Claude
+ * Code records it: the key's last 20 characters, in the dir's .claude.json.
+ */
+function approveApiKey(dir: string, key: string): void {
+  const file = path.join(dir, '.claude.json');
+  let config: Record<string, unknown> = {};
+  try {
+    config = JSON.parse(fs.readFileSync(file, 'utf-8')) as Record<string, unknown>;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return; // never clobber a file we can't read
+  }
+  const tail = key.trim().slice(-20);
+  const prev = (config.customApiKeyResponses ?? {}) as { approved?: string[]; rejected?: string[] };
+  const approved = Array.isArray(prev.approved) ? prev.approved : [];
+  const rejected = Array.isArray(prev.rejected) ? prev.rejected : [];
+  if (approved.includes(tail) && !rejected.includes(tail)) return;
+  config.customApiKeyResponses = {
+    ...prev,
+    approved: approved.includes(tail) ? approved : [...approved, tail],
+    rejected: rejected.filter((r) => r !== tail),
+  };
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(config, null, 2), { mode: 0o600 });
+  fs.renameSync(tmp, file);
+}
 
 /**
  * Every env var a provider may set. All of them are removed when the window goes
- * back to its subscription — including the ones the current provider leaves
+ * back to its Anthropic login — including the ones the current provider leaves
  * unset, so nothing from a previous provider can linger.
  */
 const MANAGED_ENV = [
@@ -104,6 +165,8 @@ const MANAGED_TOP = ['modelOverrides', 'availableModels', 'enforceAvailableModel
 interface ProviderSettings {
   env: Record<string, string>;
   top: Partial<Record<(typeof MANAGED_TOP)[number], unknown>>;
+  /** Leave the window's own MANAGED_TOP values in place (native Anthropic serves the usual models). */
+  keepTop?: boolean;
 }
 
 /**
@@ -112,6 +175,11 @@ interface ProviderSettings {
  * can't sneak past it.
  */
 export function settingsFor(p: Provider, key: string, proxy?: ProxyHandle): ProviderSettings {
+  // Anthropic itself: just the key. The base URL is pinned so a shell export
+  // can't redirect it; Claude Code's own model lineup applies unchanged.
+  if (isNative(p)) {
+    return { env: { ANTHROPIC_BASE_URL: ANTHROPIC_API, ANTHROPIC_API_KEY: key, ANTHROPIC_AUTH_TOKEN: '' }, top: {}, keepTop: true };
+  }
   const models = modelSettings(p.catalog, p.models);
   // Through the proxy, the window holds only the proxy's own key; the gateway key
   // stays in the proxy's environment.
@@ -197,7 +265,7 @@ export class ProviderManager implements vscode.Disposable {
     await this.context.globalState.update(PROVIDERS_KEY, list);
   }
 
-  /** The provider this window bills to; undefined = its subscription. */
+  /** The provider this window bills to; undefined = its Anthropic login. */
   active(): Provider | undefined {
     const id = this.context.workspaceState.get<string>(ACTIVE_KEY);
     return id ? this.get(id) : undefined;
@@ -217,7 +285,7 @@ export class ProviderManager implements vscode.Disposable {
 
   /**
    * Writes the provider's settings into this window's settings.json, or removes
-   * them for the subscription. Leaves the rest of the file alone — Claude Code's
+   * them for the Anthropic login. Leaves the rest of the file alone — Claude Code's
    * /config writes there too. Returns true if the file changed.
    */
   private async writeSettings(desired: ProviderSettings | undefined): Promise<boolean> {
@@ -234,7 +302,7 @@ export class ProviderManager implements vscode.Disposable {
       }
     } else if (!desired) {
       if (stash) await this.context.workspaceState.update(STASH_KEY, undefined);
-      return false; // subscription, and nothing was ever written
+      return false; // Anthropic login, and nothing was ever written
     }
     const before = JSON.stringify(settings);
 
@@ -244,8 +312,8 @@ export class ProviderManager implements vscode.Disposable {
     if (Object.keys(env).length > 0) settings.env = env;
     else delete settings.env;
 
-    if (desired) {
-      // Coming from the subscription: keep the window's own values to put back.
+    if (desired && !desired.keepTop) {
+      // Coming from the Anthropic login: keep the window's own values to put back.
       if (!stash) {
         const own = Object.fromEntries(MANAGED_TOP.filter((k) => k in settings).map((k) => [k, settings[k]]));
         await this.context.workspaceState.update(STASH_KEY, own);
@@ -258,6 +326,7 @@ export class ProviderManager implements vscode.Disposable {
       await this.context.workspaceState.update(STASH_KEY, undefined);
     }
 
+    if (desired?.env.ANTHROPIC_API_KEY) approveApiKey(path.dirname(file), desired.env.ANTHROPIC_API_KEY);
     if (JSON.stringify(settings) === before) return false;
     const tmp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(settings, null, 2), { mode: 0o600 });
@@ -272,6 +341,7 @@ export class ProviderManager implements vscode.Disposable {
    * had (or none — the manual aliases still apply).
    */
   private async refreshCatalog(provider: Provider, key: string, force = false): Promise<Provider> {
+    if (isNative(provider)) return provider; // Claude Code knows Anthropic's own models
     if (!force && provider.catalogAt && Date.now() - provider.catalogAt < CATALOG_TTL_MS) return provider;
     try {
       const { claude: catalog, others } = await fetchCatalog(provider.baseUrl, provider.auth, key);
@@ -327,7 +397,7 @@ export class ProviderManager implements vscode.Disposable {
       : ensureProxy(p.id, config, key);
   }
 
-  /** Points this window at `provider` (undefined = subscription) and reloads it. */
+  /** Points this window at `provider` (undefined = its Anthropic login) and reloads it. */
   private async useInWindow(provider: Provider | undefined): Promise<void> {
     let desired: ProviderSettings | undefined;
     if (provider) {
@@ -338,7 +408,7 @@ export class ProviderManager implements vscode.Disposable {
     }
     await this.writeSettings(desired);
     await this.context.workspaceState.update(ACTIVE_KEY, provider?.id);
-    log(`provider: this window now bills to ${provider ? `${provider.name} (${provider.baseUrl})` : 'its subscription'}`);
+    log(`provider: this window now bills to ${provider ? `${provider.name} (${provider.baseUrl})` : 'its Anthropic login'}`);
     this.onDidChange.fire();
     // Claude Code keeps a long-lived process that read its env when it started;
     // only a reload makes the panel itself pick the change up.
@@ -346,7 +416,7 @@ export class ProviderManager implements vscode.Disposable {
       NOTICE_KEY,
       provider
         ? `This window now bills to ${provider.name}. Your Anthropic login stays saved — switch back any time from the status bar.`
-        : `This window is back on its Anthropic subscription.`
+        : `This window is back on its Anthropic login (${describeLogin(this.binding.getEnvDir())}).`
     );
     await vscode.commands.executeCommand('workbench.action.reloadWindow');
   }
@@ -386,9 +456,9 @@ export class ProviderManager implements vscode.Disposable {
     }
     if (!changed) return;
     const what = !provider
-      ? 'The provider this window used was removed, so it is back on its Anthropic subscription.'
+      ? 'The provider this window used was removed, so it is back on its Anthropic login.'
       : !key
-        ? `${provider.name} has no stored key any more, so this window is back on its Anthropic subscription.`
+        ? `${provider.name} has no stored key any more, so this window is back on its Anthropic login.`
         : `${provider.name}'s settings changed.`;
     log(`provider sync: ${what}`);
     const pick = await vscode.window.showInformationMessage(
@@ -401,7 +471,7 @@ export class ProviderManager implements vscode.Disposable {
   /**
    * `claudeCode.environmentVariables` is one setting for every window. A gateway
    * credential there doesn't beat a provider picked here (settings.json env wins
-   * over the process env), but it DOES silently replace the subscription in every
+   * over the process env), but it DOES silently replace the Anthropic login in every
    * window set to use it. Warn rather than strip: unlike CLAUDE_CONFIG_DIR, it may
    * well be deliberate.
    */
@@ -418,7 +488,7 @@ export class ProviderManager implements vscode.Disposable {
     void vscode.window
       .showWarningMessage(
         `Claude Accounts: the claudeCode.environmentVariables setting sets ${found.join(', ')} for EVERY ` +
-          `window, so windows on "Subscription" won't use their Anthropic login. Add it as a provider ` +
+          `window, so windows on "Anthropic" won't use their Anthropic login. Add it as a provider ` +
           `instead to choose it per window.`,
         'Open setting',
         "Don't show again"
@@ -447,12 +517,13 @@ export class ProviderManager implements vscode.Disposable {
     const mark = (on: boolean) => (on ? '$(check) ' : '');
     const items: Item[] = [
       {
-        label: `${mark(!current)}Subscription`,
-        description: 'the Anthropic login of this window\'s account',
+        label: `${mark(!current)}Anthropic`,
+        description: describeLogin(this.binding.getEnvDir()),
+        detail: 'Default — this account\'s own login, straight to Anthropic',
       },
       ...this.list().map((p) => ({
         label: `${mark(current?.id === p.id)}${p.name}`,
-        description: p.baseUrl,
+        description: isNative(p) ? 'Anthropic API key, billed per token' : p.baseUrl,
         provider: p,
       })),
       { label: '$(add) Add a provider…', add: true },
@@ -467,13 +538,33 @@ export class ProviderManager implements vscode.Disposable {
       return;
     }
     if (picked.provider?.id === current?.id) {
-      vscode.window.showInformationMessage(`This window already bills to ${current?.name ?? 'its subscription'}.`);
+      vscode.window.showInformationMessage(`This window already bills to ${current?.name ?? 'its Anthropic login'}.`);
       return;
     }
     await this.useInWindow(picked.provider);
   }
 
   async addInteractive(): Promise<void> {
+    const kind = (
+      await vscode.window.showQuickPick(
+        [
+          {
+            label: '$(key) Anthropic API key',
+            detail: 'A key from console.anthropic.com — straight to Anthropic, billed per token',
+            choice: 'anthropic' as const,
+          },
+          {
+            label: '$(server) Anthropic-compatible gateway',
+            detail: 'Poe, a company proxy… — a base URL and a key',
+            choice: 'gateway' as const,
+          },
+        ],
+        { title: 'Add a provider' }
+      )
+    )?.choice;
+    if (kind === 'anthropic') return this.addAnthropicKey();
+    if (!kind) return;
+
     const name = await vscode.window.showInputBox({
       title: 'Add a provider (1/4): name',
       prompt: 'Shown in the status bar, e.g. "Poe"',
@@ -534,6 +625,46 @@ export class ProviderManager implements vscode.Disposable {
     if (pick) await this.useInWindow(added);
   }
 
+  private static validateAnthropicKey(v: string): string | undefined {
+    return /^sk-ant-\S+$/.test(v.trim()) ? undefined : 'An Anthropic API key starts with sk-ant-';
+  }
+
+  /** An Anthropic API key: no URL, no header choice, no model list — Claude Code knows Anthropic. */
+  private async addAnthropicKey(): Promise<void> {
+    const taken = (v: string) => this.list().some((p) => p.name === v.trim());
+    const name = await vscode.window.showInputBox({
+      title: 'Add an Anthropic API key (1/2): name',
+      prompt: 'Shown in the status bar',
+      value: taken('Anthropic API') ? '' : 'Anthropic API',
+      validateInput: (v) => (!v.trim() ? 'Enter a name' : taken(v) ? 'That name is taken' : undefined),
+    });
+    if (!name) return;
+    const key = await vscode.window.showInputBox({
+      title: 'Add an Anthropic API key (2/2): key',
+      prompt: 'From console.anthropic.com → API keys. Stored in VS Code\'s secret storage on this computer',
+      password: true,
+      ignoreFocusOut: true,
+      validateInput: ProviderManager.validateAnthropicKey,
+    });
+    if (!key) return;
+    const provider: Provider = {
+      id: crypto.randomBytes(6).toString('hex'),
+      name: name.trim(),
+      kind: 'anthropic',
+      baseUrl: ANTHROPIC_API,
+      auth: 'x-api-key',
+    };
+    await this.context.secrets.store(secretKey(provider.id), key.trim());
+    await this.save([...this.list(), provider]);
+    log(`provider added: ${provider.name} (Anthropic API key)`);
+    const canUse = Boolean(this.settingsFile());
+    const pick = await vscode.window.showInformationMessage(
+      `Added ${provider.name}. Windows using it bill your Anthropic API key per token; the account's login stays saved.`,
+      ...(canUse ? [`Use in this window`] : [])
+    );
+    if (pick) await this.useInWindow(provider);
+  }
+
   private async pickAuth(current?: Provider['auth']): Promise<Provider['auth'] | undefined> {
     const picked = await vscode.window.showQuickPick(
       [
@@ -546,7 +677,7 @@ export class ProviderManager implements vscode.Disposable {
         {
           label: 'x-api-key',
           description: current === 'x-api-key' ? 'current' : '',
-          detail: 'Sets ANTHROPIC_API_KEY — the CLI asks once to approve a custom API key',
+          detail: 'Sets ANTHROPIC_API_KEY',
           value: 'x-api-key' as const,
         },
       ],
@@ -601,17 +732,29 @@ export class ProviderManager implements vscode.Disposable {
     }
     const target = (
       await vscode.window.showQuickPick(
-        providers.map((p) => ({ label: p.name, description: p.baseUrl, provider: p })),
+        providers.map((p) => ({
+          label: p.name,
+          description: isNative(p) ? 'Anthropic API key' : p.baseUrl,
+          provider: p,
+        })),
         { title: 'Edit or remove a provider' }
       )
     )?.provider;
     if (!target) return;
 
     type Action = 'key' | 'url' | 'auth' | 'models' | 'others' | 'refresh' | 'proxylog' | 'betas' | 'rename' | 'remove';
+    type ActionItem = vscode.QuickPickItem & { action: Action };
+    const common = (items: ActionItem[]): ActionItem[] => [
+      { label: '$(key) Replace key', action: 'key' },
+      ...items,
+      { label: '$(edit) Rename', action: 'rename' },
+      { label: '$(trash) Remove', action: 'remove' },
+    ];
     const action = (
-      await vscode.window.showQuickPick<vscode.QuickPickItem & { action: Action }>(
-        [
-          { label: '$(key) Replace key', action: 'key' },
+      await vscode.window.showQuickPick<ActionItem>(
+        isNative(target)
+          ? common([])
+          : common([
           { label: '$(link) Change base URL', description: target.baseUrl, action: 'url' },
           { label: '$(shield) Key header', description: target.auth === 'bearer' ? 'Bearer' : 'x-api-key', action: 'auth' },
           {
@@ -643,9 +786,7 @@ export class ProviderManager implements vscode.Disposable {
             detail: 'Turn off if the gateway answers "Unexpected value(s)" or "Extra inputs are not permitted"',
             action: 'betas',
           },
-          { label: '$(edit) Rename', action: 'rename' },
-          { label: '$(trash) Remove', action: 'remove' },
-        ],
+        ]),
         { title: target.name }
       )
     )?.action;
@@ -658,7 +799,9 @@ export class ProviderManager implements vscode.Disposable {
           title: `New key for ${target.name}`,
           password: true,
           ignoreFocusOut: true,
-          validateInput: (v) => (v.trim() ? undefined : 'Enter the key'),
+          validateInput: isNative(target)
+            ? ProviderManager.validateAnthropicKey
+            : (v) => (v.trim() ? undefined : 'Enter the key'),
         });
         if (!key) return;
         await this.context.secrets.store(secretKey(target.id), key.trim());
@@ -773,7 +916,7 @@ export class ProviderManager implements vscode.Disposable {
       case 'remove': {
         const ok = await vscode.window.showWarningMessage(
           `Remove ${target.name}? Its key is deleted from secret storage, and every window using it goes ` +
-            `back to its Anthropic subscription.`,
+            `back to its Anthropic login.`,
           { modal: true },
           'Remove'
         );
@@ -782,7 +925,7 @@ export class ProviderManager implements vscode.Disposable {
         await this.context.secrets.delete(secretKey(target.id));
         await stopProxy(target.id);
         log(`provider removed: ${target.name}`);
-        // This window used it: back to the subscription now. Other windows find
+        // This window used it: back to the Anthropic login now. Other windows find
         // it gone on their next sync (focus) and offer the reload themselves.
         if (this.context.workspaceState.get<string>(ACTIVE_KEY) === target.id) {
           await this.useInWindow(undefined);

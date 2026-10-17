@@ -4,7 +4,7 @@ import { log } from './log';
 import { WindowBinding } from './binding';
 import { getAuthStatus, AuthStatus } from './cli';
 import { defaultSourceDir } from './capture';
-import { ProviderManager, describeModels } from './providers';
+import { ProviderManager, describeLogin, describeModels } from './providers';
 
 /** Marketplace id — the hover links to the extension's own page with it. */
 const EXTENSION_ID = 'DercasDrol.claude-parallel-accounts';
@@ -209,7 +209,7 @@ export class StatusBarManager implements vscode.Disposable {
       const actions = [
         !isSaved ? '[$(save) Save this account](command:claudeProfiles.captureAccount "Save it so you can switch back to it later")' : '',
         hasOthers ? '[$(arrow-swap) Switch account](command:claudeProfiles.switchAccount "Pick another account for this window")' : '',
-        '[$(credit-card) Switch provider](command:claudeProfiles.switchProvider "Bill this window to your subscription or a gateway such as Poe")',
+        '[$(credit-card) Switch provider](command:claudeProfiles.switchProvider "Bill this window to its Anthropic login, an Anthropic API key, or a gateway such as Poe")',
         unique.length > 0
           ? '[$(trash) Forget…](command:claudeProfiles.removeProfile "Sign the account out and remove it from the list")'
           : '',
@@ -217,16 +217,17 @@ export class StatusBarManager implements vscode.Disposable {
       this.item.tooltip = this.card([
         `**${email}**${status?.subscriptionType ? ` · ${status.subscriptionType}` : ''}${status?.orgName ? ` · ${status.orgName}` : ''}`,
         `This window runs this account. Other windows can run others at the same time.`,
-        provider
-          ? `$(credit-card) Billing to **${provider.name}** (\`${provider.baseUrl}\`) — the Anthropic login ` +
-            `stays saved but unused until you switch back.` +
-            (describeModels(provider) ? `\n\nModels: ${describeModels(provider)}` : '') +
-            (provider.extraModels?.length
-              ? ` · plus ${provider.extraModels.length} non-Claude through the local proxy`
-              : '')
-          : this.providers.list().length > 0
-            ? `$(credit-card) Billing to the Anthropic subscription.`
-            : '',
+        provider?.kind === 'anthropic'
+          ? `$(credit-card) Billing to **${provider.name}** — an Anthropic API key, per token. The account's ` +
+            `login stays saved but unused until you switch back to **Anthropic**.`
+          : provider
+            ? `$(credit-card) Billing to **${provider.name}** (\`${provider.baseUrl}\`) — the Anthropic login ` +
+              `stays saved but unused until you switch back.` +
+              (describeModels(provider) ? `\n\nModels: ${describeModels(provider)}` : '') +
+              (provider.extraModels?.length
+                ? ` · plus ${provider.extraModels.length} non-Claude through the local proxy`
+                : '')
+            : `$(credit-card) Billing to **Anthropic** — ${describeLogin(dir)}.`,
         `Accounts saved: **${unique.length}**${
           this.binding.rememberedForFolder() ? ' · _auto-selected: this folder used it last time_' : ''
         }`,
