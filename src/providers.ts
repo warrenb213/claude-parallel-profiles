@@ -718,7 +718,7 @@ export class ProviderManager implements vscode.Disposable {
         const picked = await vscode.window.showQuickPick(
           others.map((m) => ({
             label: m.id,
-            description: [m.ownedBy, m.contextLength ? `${Math.round(m.contextLength / 1000)}K context` : '']
+            description: [m.ownedBy, m.contextLength ? `${Math.round(m.contextLength / 1000)}K context` : 'context unknown']
               .filter(Boolean)
               .join(' · '),
             picked: enabled.has(m.id),

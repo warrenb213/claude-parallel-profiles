@@ -108,11 +108,19 @@ export interface OtherModel {
 }
 
 /**
+ * Claude Code assumes a 200K window for any model it doesn't recognise and
+ * auto-compacts against that, with no per-model override (its
+ * CLAUDE_CODE_MAX_CONTEXT_TOKENS is window-wide). A smaller model would hit the
+ * gateway's context limit before compaction kicks in.
+ */
+const MIN_CONTEXT = 200_000;
+
+/**
  * The non-Claude models worth offering to Claude Code: text out, tool calling
- * (Claude Code is tools all the way down), and OpenAI's chat-completions endpoint.
- * Each check applies only where the gateway describes the model at all — Poe
- * does, in detail; a plain OpenAI-compatible list doesn't, and then every
- * non-Claude model is offered.
+ * (Claude Code is tools all the way down), OpenAI's chat-completions endpoint,
+ * and a context window of at least MIN_CONTEXT. Each check applies only where
+ * the gateway describes the model at all — Poe does, in detail; a plain
+ * OpenAI-compatible list doesn't, and then every non-Claude model is offered.
  */
 export function parseOtherModels(body: unknown): OtherModel[] {
   const data = (body as { data?: unknown })?.data;
@@ -131,6 +139,7 @@ export function parseOtherModels(body: unknown): OtherModel[] {
     const outputs = m.architecture?.output_modalities;
     if (Array.isArray(outputs) && !(outputs.length === 1 && outputs[0] === 'text')) continue;
     if (Array.isArray(m.supported_features) && !m.supported_features.includes('tools')) continue;
+    if (typeof m.context_length === 'number' && m.context_length < MIN_CONTEXT) continue;
     if (
       Array.isArray(m.supported_endpoints) &&
       m.supported_endpoints.length > 0 &&

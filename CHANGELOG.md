@@ -6,7 +6,7 @@
 
 - **Billing providers per window.** *Switch provider* points a window at the Anthropic subscription or at an Anthropic-compatible gateway (e.g. Poe) with its own base URL and key, without changing the account, its history or its settings. Keys live in VS Code's secret storage.
 - **Provider model catalog.** The gateway's `/v1/models` list decides what Claude Code's model picker shows: exactly the Claude models it serves, each recognised as the model it is and sent under the gateway's name for it.
-- **Non-Claude models through a local LiteLLM proxy** (opt-in, per provider). Qwen, GLM, DeepSeek… served in OpenAI's format are translated for Claude Code by a proxy on `127.0.0.1`; Claude models pass through untouched. LiteLLM is installed only on an explicit yes, every package pinned by SHA-256 (`--require-hashes`), and its remote-config downloads are disabled. The gateway key stays in the proxy's memory. Uninstalling stops the proxy.
+- **Non-Claude models through a local LiteLLM proxy** (opt-in, per provider). Qwen, GLM, DeepSeek… served in OpenAI's format are translated for Claude Code by a proxy on `127.0.0.1`; Claude models pass through untouched; models with a stated context window under 200K are not offered. LiteLLM is installed only on an explicit yes, every package pinned by SHA-256 (`--require-hashes`), and its remote-config downloads are disabled. The gateway key stays in the proxy's memory. Uninstalling stops the proxy.
 
 ### Fixed
 
