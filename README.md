@@ -65,6 +65,8 @@ Claude Code signs you into **one** account, shared by every VSCode window. If yo
 
 **Signing out** (Claude Code's account menu, or `/logout`) revokes the token on Anthropic's side — for every copy of it. The extension notices and removes the account from the list everywhere, since switching to it could only fail.
 
+**Switching provider** (status bar hover → *Switch provider*, or *Claude Accounts: Switch Provider for This Window*) changes where this window's requests go and who pays for them, without changing the account: same history, settings and project trust. *Subscription* is the account's own Anthropic login; any other provider is an Anthropic-compatible gateway with a base URL and a key — for example [Poe](https://creator.poe.com/docs/external-applications/claude-code) (`https://api.poe.com`, Bearer key) when your subscription's usage runs out. Add one with *Claude Accounts: Add a Provider*. The window reloads, the status bar shows `you@example.com · Poe`, and the Anthropic login stays saved but unused until you switch back. Each window remembers its own provider, and terminals in the window follow it. *Edit or Remove a Provider* adjusts model aliases and turns off experimental beta headers for gateways that reject them.
+
 ---
 
 ## One conversation history
@@ -123,6 +125,7 @@ This extension is built to manage credentials, so it holds itself to a strict po
 
 - **No telemetry, no analytics, no network code at all.** The source contains zero network calls and **zero runtime dependencies** — it is your files, the `vscode` API, and Node's standard library. Nothing is ever sent anywhere.
 - **Everything stays in your home directory.** Accounts, working copies and the history store live under `~/.claude*`, created with owner-only permissions (`600`/`700`). Credentials are only ever *copied between* Claude Code's own data directories on this machine — never parsed beyond checking they exist, never displayed, never transmitted.
+- **Provider keys** are stored in VS Code's secret storage on the computer running VS Code, entered once for every remote host. A window using a provider also gets a copy in its own `settings.json` (`600`), next to the OAuth token its directory already holds, because that file is how Claude Code receives it. Switching back to *Subscription*, removing the provider, or uninstalling removes that copy.
 - **Conversations are moved, not read.** Shared history relinks the files; the extension does not inspect their contents.
 - **Minimal footprint elsewhere:** the workspace folder path is hashed to tell windows apart; `claude auth status` is asked (locally, read-only) to confirm a directory is signed in; on Linux/WSL the process list is scanned only during *Forget*, to stop `claude` processes running on the token being deleted.
 - **Self-restricted in the VSCode manifest:** disabled in virtual workspaces, and in Restricted Mode (untrusted folders) it never reads workspace content — only the folder's path, to tell windows apart ([`capabilities`](package.json)).

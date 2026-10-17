@@ -74,6 +74,21 @@
         "command": "claudeProfiles.showLog",
         "title": "Show Log",
         "category": "Claude Accounts"
+      },
+      {
+        "command": "claudeProfiles.switchProvider",
+        "title": "Switch Provider for This Window",
+        "category": "Claude Accounts"
+      },
+      {
+        "command": "claudeProfiles.addProvider",
+        "title": "Add a Provider",
+        "category": "Claude Accounts"
+      },
+      {
+        "command": "claudeProfiles.editProvider",
+        "title": "Edit or Remove a Provider",
+        "category": "Claude Accounts"
       }
     ]
   },

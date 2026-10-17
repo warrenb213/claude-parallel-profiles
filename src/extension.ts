@@ -10,6 +10,7 @@ import { ensureSharedHistory } from './sharedHistory';
 import { defaultSourceDir } from './capture';
 import { AccountWatcher } from './accountWatcher';
 import { HostState } from './hostState';
+import { ProviderManager } from './providers';
 import { allWorkingDirs, workingRoot } from './workdir';
 import { log, showLog } from './log';
 
@@ -60,6 +61,9 @@ function activateUnsupported(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claudeProfiles.switchAccount', explain),
     vscode.commands.registerCommand('claudeProfiles.captureAccount', explain),
     vscode.commands.registerCommand('claudeProfiles.removeProfile', explain),
+    vscode.commands.registerCommand('claudeProfiles.switchProvider', explain),
+    vscode.commands.registerCommand('claudeProfiles.addProvider', explain),
+    vscode.commands.registerCommand('claudeProfiles.editProvider', explain),
     vscode.commands.registerCommand('claudeProfiles.showStatus', explain),
     vscode.commands.registerCommand('claudeProfiles.showLog', () => showLog())
   );
@@ -80,7 +84,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const registry = new AccountRegistry(state);
   const binding = new WindowBinding(context, state);
   const wizard = new SetupWizard(registry, binding, context);
-  const statusBar = new StatusBarManager(registry, binding);
+  const providers = new ProviderManager(context, binding);
+  const statusBar = new StatusBarManager(registry, binding, providers);
 
   // A forgotten account no longer resolves, so a window that remembered one
   // falls back to the default dir and — via auto-save — onto whichever saved
@@ -189,14 +194,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     cmd('claudeProfiles.removeProfile', () => wizard.removeAccountInteractive()),
     cmd('claudeProfiles.showStatus', () => statusBar.onClick()),
     cmd('claudeProfiles.showLog', () => showLog()),
+    cmd('claudeProfiles.switchProvider', () => providers.switchInteractive()),
+    cmd('claudeProfiles.addProvider', () => providers.addInteractive()),
+    cmd('claudeProfiles.editProvider', () => providers.editInteractive()),
     // Only the focused window repairs a dir whose account was replaced by a
     // sign-in (it's the window the user signed in from). So a window that was
     // unfocused while that happened must reconcile when focus comes back —
     // otherwise a handoff nobody was around to finish would sit unrepaired.
     vscode.window.onDidChangeWindowState((s) => {
       if (s.focused) void wizard.reconcile().finally(() => statusBar.reconfirm());
+      // Provider definitions are shared: another window or host may have edited
+      // or removed the one this window bills to.
+      if (s.focused) void providers.sync();
     }),
-    statusBar
+    statusBar,
+    providers
   );
 
   statusBar.initialize();
@@ -241,6 +253,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   await wizard.reconcile({ atActivation: true });
   // reconcile() may have just bound this window to a freshly-saved account.
   if (!bound) bound = binding.applyStored(resolveAccount);
+
+  // Not part of the activation race: settings.json is read by each `claude` when
+  // it starts, and it already carries the provider written at the last switch.
+  void providers.sync();
+  providers.warnAboutSharedOverride();
 
   // An account handoff finishes with a reload, which kills any toast raised
   // before it — so the news of what happened is delivered here instead.

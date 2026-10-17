@@ -4,6 +4,7 @@ import { log } from './log';
 import { WindowBinding } from './binding';
 import { getAuthStatus, AuthStatus } from './cli';
 import { defaultSourceDir } from './capture';
+import { ProviderManager } from './providers';
 
 /** Marketplace id — the hover links to the extension's own page with it. */
 const EXTENSION_ID = 'DercasDrol.claude-parallel-accounts';
@@ -29,7 +30,8 @@ export class StatusBarManager implements vscode.Disposable {
 
   constructor(
     private readonly registry: AccountRegistry,
-    private readonly binding: WindowBinding
+    private readonly binding: WindowBinding,
+    private readonly providers: ProviderManager
   ) {
     this.item = vscode.window.createStatusBarItem(
       'claudeProfiles.status',
@@ -44,6 +46,7 @@ export class StatusBarManager implements vscode.Disposable {
         if (dir) this.statusCache.delete(dir); // force re-confirm after a switch
         this.refresh();
       }),
+      this.providers.onDidChange.event(() => this.render()),
       // Coming back to the window is the natural moment the account may have
       // changed behind our back (e.g. /login in the Claude Code panel).
       vscode.window.onDidChangeWindowState((s) => {
@@ -187,7 +190,13 @@ export class StatusBarManager implements vscode.Disposable {
       // named copy in another window.
       const savedByEmail = email ? this.registry.savedForEmail(email) : undefined;
       const isSaved = Boolean(savedName || active || savedByEmail);
-      this.item.text = `$(account) ${email}${isSaved ? '' : ' $(circle-outline)'}`;
+      // The provider goes in the TEXT, not just the hover: Claude Code's own panel
+      // keeps showing the Anthropic login while a gateway is billing, so this is
+      // the one place that says where requests actually go.
+      const provider = this.providers.active();
+      this.item.text = `$(account) ${email}${isSaved ? '' : ' $(circle-outline)'}${
+        provider ? ` · ${provider.name}` : ''
+      }`;
       // The tooltip doubles as the action menu: VSCode cannot anchor a real
       // menu to a status bar item, but a trusted-markdown hover CAN hold
       // command links — so the actions appear right above the button.
@@ -200,6 +209,7 @@ export class StatusBarManager implements vscode.Disposable {
       const actions = [
         !isSaved ? '[$(save) Save this account](command:claudeProfiles.captureAccount "Save it so you can switch back to it later")' : '',
         hasOthers ? '[$(arrow-swap) Switch account](command:claudeProfiles.switchAccount "Pick another account for this window")' : '',
+        '[$(credit-card) Switch provider](command:claudeProfiles.switchProvider "Bill this window to your subscription or a gateway such as Poe")',
         unique.length > 0
           ? '[$(trash) Forget…](command:claudeProfiles.removeProfile "Sign the account out and remove it from the list")'
           : '',
@@ -207,6 +217,12 @@ export class StatusBarManager implements vscode.Disposable {
       this.item.tooltip = this.card([
         `**${email}**${status?.subscriptionType ? ` · ${status.subscriptionType}` : ''}${status?.orgName ? ` · ${status.orgName}` : ''}`,
         `This window runs this account. Other windows can run others at the same time.`,
+        provider
+          ? `$(credit-card) Billing to **${provider.name}** (\`${provider.baseUrl}\`) — the Anthropic login ` +
+            `stays saved but unused until you switch back.`
+          : this.providers.list().length > 0
+            ? `$(credit-card) Billing to the Anthropic subscription.`
+            : '',
         `Accounts saved: **${unique.length}**${
           this.binding.rememberedForFolder() ? ' · _auto-selected: this folder used it last time_' : ''
         }`,
