@@ -93,8 +93,12 @@ jobs:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
             # One universal .vsix, published by path to both registries.
+            # Only the upstream repo publishes: the listing belongs to DercasDrol.
+            # Forks (e.g. warrenb213/claude-parallel-profiles) never publish, even
+            # if a token is added there by mistake.
             - name: Publish to VS Code Marketplace
               if: |
+                  github.repository == 'DercasDrol/claude-parallel-profiles' &&
                   (startsWith(github.ref, 'refs/tags/') || github.event.inputs.publish == 'true') &&
                   env.VSCE_PAT != ''
               run: |
@@ -106,6 +110,7 @@ jobs:
 
             - name: Publish to Open VSX Registry
               if: |
+                  github.repository == 'DercasDrol/claude-parallel-profiles' &&
                   (startsWith(github.ref, 'refs/tags/') || github.event.inputs.publish == 'true') &&
                   env.OVSX_PAT != ''
               run: |
