@@ -5,6 +5,7 @@ import * as crypto from 'crypto';
 import { WindowBinding } from './binding';
 import { NOTICE_KEY } from './setupWizard';
 import { log } from './log';
+import { CatalogModel, Family, FAMILIES, fetchCatalog, modelSettings, newest } from './modelCatalog';
 
 /**
  * Billing providers: WHERE a window's requests go and WHO pays for them, kept
@@ -37,6 +38,13 @@ import { log } from './log';
  * disk, but a gateway key works from anywhere, so it is entered once. The
  * per-window choice is in workspaceState, and the settings.json carries a copy
  * of the key next to the OAuth token the same dir already holds (0600).
+ *
+ * Models
+ * ──────
+ * A gateway serves its own set of models under its own names. The provider keeps
+ * the gateway's list (from its `/v1/models`, see modelCatalog.ts) and the window
+ * gets the settings that make Claude Code's model picker and effort slider work
+ * on exactly that set.
  */
 
 export interface Provider {
@@ -45,8 +53,12 @@ export interface Provider {
   baseUrl: string;
   /** How the gateway takes its key: `Authorization: Bearer` or `x-api-key`. */
   auth: 'bearer' | 'x-api-key';
-  /** What Claude Code's opus/sonnet/haiku aliases resolve to on this gateway. */
-  models?: { opus?: string; sonnet?: string; haiku?: string };
+  /** Per-family picks (gateway IDs). A family without one gets the catalog's newest. */
+  models?: Partial<Record<Family, string>>;
+  /** The Claude models the gateway serves to Claude Code, from its `/v1/models`. */
+  catalog?: CatalogModel[];
+  /** When the catalog was read (ms). */
+  catalogAt?: number;
   /** For gateways that reject Anthropic's experimental `anthropic-beta` headers. */
   disableBetas?: boolean;
 }
@@ -54,6 +66,10 @@ export interface Provider {
 const PROVIDERS_KEY = 'claudeProfiles.providers';
 const ACTIVE_KEY = 'claudeProfiles.activeProvider';
 const HIDE_OVERRIDE_WARNING_KEY = 'claudeProfiles.hideProviderOverrideWarning';
+/** workspaceState: the window's own values of MANAGED_TOP, saved when a provider took them over. */
+const STASH_KEY = 'claudeProfiles.providerStash';
+/** How old a catalog may get before a window using the provider re-reads it. */
+const CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 const secretKey = (id: string) => `claudeProfiles.provider.${id}`;
 
 /**
@@ -68,25 +84,57 @@ const MANAGED_ENV = [
   'ANTHROPIC_DEFAULT_OPUS_MODEL',
   'ANTHROPIC_DEFAULT_SONNET_MODEL',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  'ANTHROPIC_DEFAULT_FABLE_MODEL',
   'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS',
 ] as const;
 
-/** The env block for a provider. The unused credential is set EMPTY, not left out: settings env overrides shell exports, so an ANTHROPIC_* key in the user's shell can't sneak past it. */
-function envFor(p: Provider, key: string): Record<string, string> {
+/**
+ * Top-level settings a provider takes over. Unlike the env vars these are things
+ * a user might set for themselves, so the window's own values are saved when a
+ * provider takes them over and put back when it goes — a leftover override would
+ * send a gateway's model name to Anthropic.
+ */
+const MANAGED_TOP = ['modelOverrides', 'availableModels', 'enforceAvailableModels'] as const;
+
+interface ProviderSettings {
+  env: Record<string, string>;
+  top: Partial<Record<(typeof MANAGED_TOP)[number], unknown>>;
+}
+
+/**
+ * Everything a provider writes. The unused credential is set EMPTY, not left out:
+ * settings env overrides shell exports, so an ANTHROPIC_* key in the user's shell
+ * can't sneak past it.
+ */
+export function settingsFor(p: Provider, key: string): ProviderSettings {
+  const models = modelSettings(p.catalog, p.models);
   const env: Record<string, string> = {
     ANTHROPIC_BASE_URL: p.baseUrl,
     ANTHROPIC_AUTH_TOKEN: p.auth === 'bearer' ? key : '',
     ANTHROPIC_API_KEY: p.auth === 'x-api-key' ? key : '',
+    ...models.env,
   };
-  if (p.models?.opus) env.ANTHROPIC_DEFAULT_OPUS_MODEL = p.models.opus;
-  if (p.models?.sonnet) env.ANTHROPIC_DEFAULT_SONNET_MODEL = p.models.sonnet;
-  if (p.models?.haiku) env.ANTHROPIC_DEFAULT_HAIKU_MODEL = p.models.haiku;
   if (p.disableBetas) env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = '1';
-  return env;
+  const top: ProviderSettings['top'] = {};
+  if (models.modelOverrides) top.modelOverrides = models.modelOverrides;
+  if (models.availableModels) top.availableModels = models.availableModels;
+  if (models.enforceAvailableModels) top.enforceAvailableModels = true;
+  return { env, top };
+}
+
+/** "opus → claude-opus-4.8, …" — what each family resolves to on this provider. */
+export function describeModels(p: Provider): string {
+  const { env, modelOverrides = {} } = modelSettings(p.catalog, p.models);
+  return FAMILIES.filter((f) => env[`ANTHROPIC_DEFAULT_${f.toUpperCase()}_MODEL`])
+    .map((f) => {
+      const id = env[`ANTHROPIC_DEFAULT_${f.toUpperCase()}_MODEL`];
+      return `${f} → ${modelOverrides[id] ?? id}`; // the gateway's name, as the user knows it
+    })
+    .join(', ');
 }
 
 function formatModels(m: Provider['models']): string {
-  return (['opus', 'sonnet', 'haiku'] as const)
+  return FAMILIES
     .filter((k) => m?.[k])
     .map((k) => `${k}=${m![k]}`)
     .join(', ');
@@ -95,9 +143,9 @@ function formatModels(m: Provider['models']): string {
 function parseModels(input: string): Provider['models'] | string {
   const models: NonNullable<Provider['models']> = {};
   for (const part of input.split(',').map((s) => s.trim()).filter(Boolean)) {
-    const m = /^(opus|sonnet|haiku)\s*=\s*(\S+)$/i.exec(part);
+    const m = /^(opus|sonnet|haiku|fable)\s*=\s*(\S+)$/i.exec(part);
     if (!m) return `"${part}" — expected alias=model, e.g. sonnet=claude-sonnet-4-5`;
-    models[m[1].toLowerCase() as 'opus' | 'sonnet' | 'haiku'] = m[2];
+    models[m[1].toLowerCase() as Family] = m[2];
   }
   return models;
 }
@@ -143,13 +191,14 @@ export class ProviderManager implements vscode.Disposable {
   }
 
   /**
-   * Writes the provider's env into this window's settings.json, or removes every
-   * managed var for the subscription. Leaves the rest of the file alone — Claude
-   * Code's /config writes there too. Returns true if the file changed.
+   * Writes the provider's settings into this window's settings.json, or removes
+   * them for the subscription. Leaves the rest of the file alone — Claude Code's
+   * /config writes there too. Returns true if the file changed.
    */
-  private writeEnv(env: Record<string, string> | undefined): boolean {
+  private async writeSettings(desired: ProviderSettings | undefined): Promise<boolean> {
     const file = this.settingsFile();
     if (!file) throw new Error('This window has no account of its own yet — sign in or pick an account first.');
+    const stash = this.context.workspaceState.get<Record<string, unknown>>(STASH_KEY);
     let settings: Record<string, unknown> = {};
     if (fs.existsSync(file)) {
       try {
@@ -158,15 +207,32 @@ export class ProviderManager implements vscode.Disposable {
         // Never overwrite a file we can't read — it may hold the user's own settings.
         throw new Error(`Can't read ${file} (${(err as Error).message}). Fix or remove it, then try again.`);
       }
-    } else if (!env) {
+    } else if (!desired) {
+      if (stash) await this.context.workspaceState.update(STASH_KEY, undefined);
       return false; // subscription, and nothing was ever written
     }
     const before = JSON.stringify(settings);
-    const current = { ...((settings.env as Record<string, string> | undefined) ?? {}) };
-    for (const k of MANAGED_ENV) delete current[k];
-    Object.assign(current, env ?? {});
-    if (Object.keys(current).length > 0) settings.env = current;
+
+    const env = { ...((settings.env as Record<string, string> | undefined) ?? {}) };
+    for (const k of MANAGED_ENV) delete env[k];
+    Object.assign(env, desired?.env ?? {});
+    if (Object.keys(env).length > 0) settings.env = env;
     else delete settings.env;
+
+    if (desired) {
+      // Coming from the subscription: keep the window's own values to put back.
+      if (!stash) {
+        const own = Object.fromEntries(MANAGED_TOP.filter((k) => k in settings).map((k) => [k, settings[k]]));
+        await this.context.workspaceState.update(STASH_KEY, own);
+      }
+      for (const k of MANAGED_TOP) delete settings[k];
+      Object.assign(settings, desired.top);
+    } else if (stash) {
+      for (const k of MANAGED_TOP) delete settings[k];
+      Object.assign(settings, stash);
+      await this.context.workspaceState.update(STASH_KEY, undefined);
+    }
+
     if (JSON.stringify(settings) === before) return false;
     const tmp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(settings, null, 2), { mode: 0o600 });
@@ -175,15 +241,36 @@ export class ProviderManager implements vscode.Disposable {
     return true;
   }
 
+  /**
+   * Re-reads the provider's model list when it's missing or older than a day.
+   * Best effort: a gateway that's down, or has no /v1/models, keeps the list it
+   * had (or none — the manual aliases still apply).
+   */
+  private async refreshCatalog(provider: Provider, key: string, force = false): Promise<Provider> {
+    if (!force && provider.catalogAt && Date.now() - provider.catalogAt < CATALOG_TTL_MS) return provider;
+    try {
+      const catalog = await fetchCatalog(provider.baseUrl, provider.auth, key);
+      const updated: Provider = { ...provider, catalog, catalogAt: Date.now() };
+      await this.save(this.list().map((p) => (p.id === provider.id ? updated : p)));
+      log(`provider ${provider.name}: ${catalog.length} Claude models on /v1/messages (${describeModels(updated)})`);
+      return updated;
+    } catch (err) {
+      log(`provider ${provider.name}: could not read the model list — ${(err as Error).message}`);
+      if (force) throw err;
+      return provider;
+    }
+  }
+
   /** Points this window at `provider` (undefined = subscription) and reloads it. */
   private async useInWindow(provider: Provider | undefined): Promise<void> {
-    let env: Record<string, string> | undefined;
+    let desired: ProviderSettings | undefined;
     if (provider) {
       const key = await this.context.secrets.get(secretKey(provider.id));
       if (!key) throw new Error(`No key is stored for ${provider.name}. Edit the provider and set its key.`);
-      env = envFor(provider, key);
+      provider = await this.refreshCatalog(provider, key);
+      desired = settingsFor(provider, key);
     }
-    this.writeEnv(env);
+    await this.writeSettings(desired);
     await this.context.workspaceState.update(ACTIVE_KEY, provider?.id);
     log(`provider: this window now bills to ${provider ? `${provider.name} (${provider.baseUrl})` : 'its subscription'}`);
     this.onDidChange.fire();
@@ -207,11 +294,12 @@ export class ProviderManager implements vscode.Disposable {
   async sync(): Promise<void> {
     const id = this.context.workspaceState.get<string>(ACTIVE_KEY);
     if (!id || !this.settingsFile()) return;
-    const provider = this.get(id);
+    let provider = this.get(id);
     const key = provider ? await this.context.secrets.get(secretKey(provider.id)) : undefined;
+    if (provider && key) provider = await this.refreshCatalog(provider, key);
     let changed: boolean;
     try {
-      changed = this.writeEnv(provider && key ? envFor(provider, key) : undefined);
+      changed = await this.writeSettings(provider && key ? settingsFor(provider, key) : undefined);
     } catch (err) {
       log(`provider sync failed: ${(err as Error).message}`);
       return;
@@ -345,12 +433,29 @@ export class ProviderManager implements vscode.Disposable {
     await this.save([...this.list(), provider]);
     log(`provider added: ${provider.name} (${provider.baseUrl}, ${provider.auth})`);
 
+    // Read what the gateway serves, so the picker shows exactly that.
+    let added = provider;
+    let found: string;
+    try {
+      added = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: `Reading ${provider.name}'s model list…` },
+        () => this.refreshCatalog(provider, key.trim(), true)
+      );
+      found = added.catalog!.length
+        ? `${added.catalog!.length} Claude models usable from Claude Code — ${describeModels(added)}.`
+        : `no Claude models it serves to Claude Code were found. Set model aliases under "Edit or Remove a Provider".`;
+    } catch (err) {
+      found =
+        `its model list couldn't be read (${(err as Error).message}). Set model aliases under ` +
+        `"Edit or Remove a Provider".`;
+    }
+
     const canUse = Boolean(this.settingsFile());
     const pick = await vscode.window.showInformationMessage(
-      `Added ${provider.name}. Model aliases and beta headers can be adjusted under "Edit or Remove a Provider".`,
+      `Added ${provider.name}: ${found}`,
       ...(canUse ? [`Use in this window`] : [])
     );
-    if (pick) await this.useInWindow(provider);
+    if (pick) await this.useInWindow(added);
   }
 
   private async pickAuth(current?: Provider['auth']): Promise<Provider['auth'] | undefined> {
@@ -374,6 +479,43 @@ export class ProviderManager implements vscode.Disposable {
     return picked?.value;
   }
 
+  /**
+   * Per-family default model, picked from the gateway's list. "Newest" keeps
+   * following the list as the gateway adds models; a specific pick stays put.
+   */
+  private async pickDefaultModels(p: Provider): Promise<Provider['models'] | undefined> {
+    const models = { ...(p.models ?? {}) };
+    for (;;) {
+      const family = (
+        await vscode.window.showQuickPick(
+          FAMILIES.filter((f) => p.catalog!.some((m) => m.family === f)).map((f) => ({
+            label: f,
+            description: models[f] ? models[f] : `newest — ${newest(p.catalog!, f)?.gatewayId}`,
+            family: f,
+          })),
+          { title: `${p.name}: default model per family`, placeHolder: 'Pick a family to change; Esc when done' }
+        )
+      )?.family;
+      if (!family) return models;
+      const choice = await vscode.window.showQuickPick(
+        [
+          { label: 'Newest', description: 'follows the gateway as it adds models', id: undefined as string | undefined },
+          ...p.catalog!
+            .filter((m) => m.family === family)
+            .map((m) => ({
+              label: m.gatewayId,
+              description: m.contextLength ? `${Math.round(m.contextLength / 1000)}K context` : '',
+              id: m.gatewayId as string | undefined,
+            })),
+        ],
+        { title: `${p.name}: ${family} model` }
+      );
+      if (!choice) continue;
+      if (choice.id) models[family] = choice.id;
+      else delete models[family];
+    }
+  }
+
   async editInteractive(): Promise<void> {
     const providers = this.list();
     if (providers.length === 0) {
@@ -389,7 +531,7 @@ export class ProviderManager implements vscode.Disposable {
     )?.provider;
     if (!target) return;
 
-    type Action = 'key' | 'url' | 'auth' | 'models' | 'betas' | 'rename' | 'remove';
+    type Action = 'key' | 'url' | 'auth' | 'models' | 'refresh' | 'betas' | 'rename' | 'remove';
     const action = (
       await vscode.window.showQuickPick<vscode.QuickPickItem & { action: Action }>(
         [
@@ -397,9 +539,16 @@ export class ProviderManager implements vscode.Disposable {
           { label: '$(link) Change base URL', description: target.baseUrl, action: 'url' },
           { label: '$(shield) Key header', description: target.auth === 'bearer' ? 'Bearer' : 'x-api-key', action: 'auth' },
           {
-            label: '$(symbol-enum) Model aliases',
-            description: formatModels(target.models) || 'Claude Code defaults',
+            label: target.catalog?.length ? '$(symbol-enum) Default models' : '$(symbol-enum) Model aliases',
+            description: describeModels(target) || 'Claude Code defaults',
             action: 'models',
+          },
+          {
+            label: '$(refresh) Refresh model list',
+            description: target.catalogAt
+              ? `${target.catalog?.length ?? 0} Claude models, read ${new Date(target.catalogAt).toLocaleString()}`
+              : 'not read yet',
+            action: 'refresh',
           },
           {
             label: `$(beaker) ${target.disableBetas ? 'Send' : 'Stop sending'} experimental beta headers`,
@@ -445,12 +594,19 @@ export class ProviderManager implements vscode.Disposable {
         break;
       }
       case 'models': {
+        if (target.catalog?.length) {
+          const models = await this.pickDefaultModels(target);
+          if (!models) return;
+          updated.models = Object.keys(models).length > 0 ? models : undefined;
+          break;
+        }
+        // No list from the gateway: name the models by hand.
         const input = await vscode.window.showInputBox({
           title: `Model aliases for ${target.name}`,
           prompt:
-            'alias=model pairs, comma-separated; empty for Claude Code\'s defaults. Use Anthropic model ' +
-            'IDs (Poe accepts them) — names Claude Code doesn\'t know lose their context-window info.',
-          placeHolder: 'opus=claude-opus-4-5, sonnet=claude-sonnet-4-5, haiku=claude-haiku-4-5',
+            'alias=model pairs as the gateway names them, comma-separated; empty for Claude Code\'s ' +
+            'defaults. Claude models are mapped so Claude Code still recognises them.',
+          placeHolder: 'opus=claude-opus-4-8, sonnet=claude-sonnet-4-6, haiku=claude-haiku-4-5',
           value: formatModels(target.models),
           validateInput: (v) => {
             const r = parseModels(v);
@@ -460,6 +616,16 @@ export class ProviderManager implements vscode.Disposable {
         if (input === undefined) return;
         const models = parseModels(input) as Provider['models'];
         updated.models = models && Object.keys(models).length > 0 ? models : undefined;
+        break;
+      }
+      case 'refresh': {
+        const key = await this.context.secrets.get(secretKey(target.id));
+        if (!key) throw new Error(`No key is stored for ${target.name}. Replace its key first.`);
+        const fresh = await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: `Reading ${target.name}'s model list…` },
+          () => this.refreshCatalog(target, key, true)
+        );
+        Object.assign(updated, { catalog: fresh.catalog, catalogAt: fresh.catalogAt });
         break;
       }
       case 'betas':

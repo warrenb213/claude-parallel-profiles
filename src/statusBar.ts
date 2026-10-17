@@ -4,7 +4,7 @@ import { log } from './log';
 import { WindowBinding } from './binding';
 import { getAuthStatus, AuthStatus } from './cli';
 import { defaultSourceDir } from './capture';
-import { ProviderManager } from './providers';
+import { ProviderManager, describeModels } from './providers';
 
 /** Marketplace id — the hover links to the extension's own page with it. */
 const EXTENSION_ID = 'DercasDrol.claude-parallel-accounts';
@@ -219,7 +219,8 @@ export class StatusBarManager implements vscode.Disposable {
         `This window runs this account. Other windows can run others at the same time.`,
         provider
           ? `$(credit-card) Billing to **${provider.name}** (\`${provider.baseUrl}\`) — the Anthropic login ` +
-            `stays saved but unused until you switch back.`
+            `stays saved but unused until you switch back.` +
+            (describeModels(provider) ? `\n\nModels: ${describeModels(provider)}` : '')
           : this.providers.list().length > 0
             ? `$(credit-card) Billing to the Anthropic subscription.`
             : '',
