@@ -5,7 +5,8 @@ import * as crypto from 'crypto';
 import { WindowBinding } from './binding';
 import { NOTICE_KEY } from './setupWizard';
 import { log } from './log';
-import { CatalogModel, Family, FAMILIES, fetchCatalog, modelSettings, newest } from './modelCatalog';
+import { CatalogModel, Family, FAMILIES, fetchCatalog, modelSettings, newest, OtherModel, toAnthropic } from './modelCatalog';
+import { ensureProxy, install, isInstalled, ProxyHandle, proxyConfig, proxyLogFile, stopProxy } from './litellm';
 
 /**
  * Billing providers: WHERE a window's requests go and WHO pays for them, kept
@@ -59,6 +60,10 @@ export interface Provider {
   catalog?: CatalogModel[];
   /** When the catalog was read (ms). */
   catalogAt?: number;
+  /** Non-Claude models the gateway serves in OpenAI's format, from the same list. */
+  otherCatalog?: OtherModel[];
+  /** The non-Claude models the user enabled. Any at all routes the provider through the local LiteLLM proxy. */
+  extraModels?: string[];
   /** For gateways that reject Anthropic's experimental `anthropic-beta` headers. */
   disableBetas?: boolean;
 }
@@ -94,7 +99,7 @@ const MANAGED_ENV = [
  * provider takes them over and put back when it goes — a leftover override would
  * send a gateway's model name to Anthropic.
  */
-const MANAGED_TOP = ['modelOverrides', 'availableModels', 'enforceAvailableModels'] as const;
+const MANAGED_TOP = ['modelOverrides', 'availableModels', 'enforceAvailableModels', 'modelPicker'] as const;
 
 interface ProviderSettings {
   env: Record<string, string>;
@@ -106,20 +111,40 @@ interface ProviderSettings {
  * settings env overrides shell exports, so an ANTHROPIC_* key in the user's shell
  * can't sneak past it.
  */
-export function settingsFor(p: Provider, key: string): ProviderSettings {
+export function settingsFor(p: Provider, key: string, proxy?: ProxyHandle): ProviderSettings {
   const models = modelSettings(p.catalog, p.models);
-  const env: Record<string, string> = {
-    ANTHROPIC_BASE_URL: p.baseUrl,
-    ANTHROPIC_AUTH_TOKEN: p.auth === 'bearer' ? key : '',
-    ANTHROPIC_API_KEY: p.auth === 'x-api-key' ? key : '',
-    ...models.env,
-  };
+  // Through the proxy, the window holds only the proxy's own key; the gateway key
+  // stays in the proxy's environment.
+  const env: Record<string, string> = proxy
+    ? { ANTHROPIC_BASE_URL: `http://127.0.0.1:${proxy.port}`, ANTHROPIC_AUTH_TOKEN: proxy.masterKey, ANTHROPIC_API_KEY: '' }
+    : {
+        ANTHROPIC_BASE_URL: p.baseUrl,
+        ANTHROPIC_AUTH_TOKEN: p.auth === 'bearer' ? key : '',
+        ANTHROPIC_API_KEY: p.auth === 'x-api-key' ? key : '',
+      };
+  Object.assign(env, models.env);
   if (p.disableBetas) env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = '1';
   const top: ProviderSettings['top'] = {};
   if (models.modelOverrides) top.modelOverrides = models.modelOverrides;
   if (models.availableModels) top.availableModels = models.availableModels;
   if (models.enforceAvailableModels) top.enforceAvailableModels = true;
+  const extras = proxy ? p.extraModels ?? [] : [];
+  if (extras.length > 0) {
+    // Claude Code's gateway discovery only lists IDs containing "claude", so the
+    // other models get picker rows of their own — and must be on the allowlist.
+    if (models.availableModels) top.availableModels = [...models.availableModels, ...extras];
+    top.modelPicker = {
+      options: extras.map((id) => ({ model: id, description: `${p.name} · translated by the local LiteLLM proxy` })),
+    };
+  }
   return { env, top };
+}
+
+/** The gateway names of the Claude models a provider routes: its catalog, plus manual picks. */
+function claudeGatewayIds(p: Provider): string[] {
+  const ids = new Set((p.catalog ?? []).map((m) => m.gatewayId));
+  for (const id of Object.values(p.models ?? {})) if (id && toAnthropic(id)) ids.add(id);
+  return [...ids];
 }
 
 /** "opus → claude-opus-4.8, …" — what each family resolves to on this provider. */
@@ -249,16 +274,57 @@ export class ProviderManager implements vscode.Disposable {
   private async refreshCatalog(provider: Provider, key: string, force = false): Promise<Provider> {
     if (!force && provider.catalogAt && Date.now() - provider.catalogAt < CATALOG_TTL_MS) return provider;
     try {
-      const catalog = await fetchCatalog(provider.baseUrl, provider.auth, key);
-      const updated: Provider = { ...provider, catalog, catalogAt: Date.now() };
+      const { claude: catalog, others } = await fetchCatalog(provider.baseUrl, provider.auth, key);
+      const updated: Provider = { ...provider, catalog, otherCatalog: others, catalogAt: Date.now() };
       await this.save(this.list().map((p) => (p.id === provider.id ? updated : p)));
-      log(`provider ${provider.name}: ${catalog.length} Claude models on /v1/messages (${describeModels(updated)})`);
+      log(
+        `provider ${provider.name}: ${catalog.length} Claude models on /v1/messages (${describeModels(updated)}), ` +
+          `${others.length} others usable through the proxy`
+      );
       return updated;
     } catch (err) {
       log(`provider ${provider.name}: could not read the model list — ${(err as Error).message}`);
       if (force) throw err;
       return provider;
     }
+  }
+
+  private lockFile(): string {
+    return path.join(this.context.extensionPath, 'litellm', 'requirements.lock');
+  }
+
+  /**
+   * The provider's proxy, when it routes through one. Installing LiteLLM is a big,
+   * one-time step (~600 MB), so it only happens on an explicit yes: `interactive`
+   * asks; otherwise a missing install means no proxy and the caller falls back to
+   * the gateway's Claude models only.
+   */
+  private async proxyFor(p: Provider, key: string, interactive: boolean): Promise<ProxyHandle | undefined> {
+    if (!p.extraModels?.length) return undefined;
+    if (!isInstalled(this.lockFile())) {
+      if (!interactive) return undefined;
+      const ok = await vscode.window.showWarningMessage(
+        `Running non-Claude models needs a local LiteLLM proxy. Install it on this host now?\n\n` +
+          `• Into ~/.claude-windows/litellm (about 600 MB), with uv or Python 3.10+.\n` +
+          `• Every package pinned by hash — a tampered download fails instead of installing.\n` +
+          `• Listens on 127.0.0.1 only; your ${p.name} key stays in its memory, never in a file.\n` +
+          `• Uninstalling this extension removes it.`,
+        { modal: true },
+        'Install'
+      );
+      if (ok !== 'Install') return undefined;
+      await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'Installing LiteLLM (hash-verified)…' },
+        () => install(this.lockFile())
+      );
+    }
+    const config = proxyConfig(p.baseUrl, claudeGatewayIds(p), p.extraModels);
+    return interactive
+      ? vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: `Starting the local proxy for ${p.name}…` },
+          () => ensureProxy(p.id, config, key)
+        )
+      : ensureProxy(p.id, config, key);
   }
 
   /** Points this window at `provider` (undefined = subscription) and reloads it. */
@@ -268,7 +334,7 @@ export class ProviderManager implements vscode.Disposable {
       const key = await this.context.secrets.get(secretKey(provider.id));
       if (!key) throw new Error(`No key is stored for ${provider.name}. Edit the provider and set its key.`);
       provider = await this.refreshCatalog(provider, key);
-      desired = settingsFor(provider, key);
+      desired = settingsFor(provider, key, await this.proxyFor(provider, key, true));
     }
     await this.writeSettings(desired);
     await this.context.workspaceState.update(ACTIVE_KEY, provider?.id);
@@ -299,7 +365,17 @@ export class ProviderManager implements vscode.Disposable {
     if (provider && key) provider = await this.refreshCatalog(provider, key);
     let changed: boolean;
     try {
-      changed = await this.writeSettings(provider && key ? settingsFor(provider, key) : undefined);
+      // The proxy may be down — after a reboot, or another window changed its
+      // models — and this is what brings it back before the window needs it.
+      let proxy: ProxyHandle | undefined;
+      if (provider && key) {
+        try {
+          proxy = await this.proxyFor(provider, key, false);
+        } catch (err) {
+          log(`provider sync: proxy for ${provider.name} failed — ${(err as Error).message}`);
+        }
+      }
+      changed = await this.writeSettings(provider && key ? settingsFor(provider, key, proxy) : undefined);
     } catch (err) {
       log(`provider sync failed: ${(err as Error).message}`);
       return;
@@ -531,7 +607,7 @@ export class ProviderManager implements vscode.Disposable {
     )?.provider;
     if (!target) return;
 
-    type Action = 'key' | 'url' | 'auth' | 'models' | 'refresh' | 'betas' | 'rename' | 'remove';
+    type Action = 'key' | 'url' | 'auth' | 'models' | 'others' | 'refresh' | 'proxylog' | 'betas' | 'rename' | 'remove';
     const action = (
       await vscode.window.showQuickPick<vscode.QuickPickItem & { action: Action }>(
         [
@@ -543,6 +619,17 @@ export class ProviderManager implements vscode.Disposable {
             description: describeModels(target) || 'Claude Code defaults',
             action: 'models',
           },
+          {
+            label: '$(extensions) Non-Claude models',
+            description: target.extraModels?.length
+              ? `${target.extraModels.length} enabled, through the local proxy`
+              : `${target.otherCatalog?.length ?? 0} available`,
+            detail: 'Qwen, GLM, DeepSeek… translated for Claude Code by a local LiteLLM proxy',
+            action: 'others',
+          },
+          ...(target.extraModels?.length
+            ? [{ label: '$(output) Show proxy log', action: 'proxylog' as Action }]
+            : []),
           {
             label: '$(refresh) Refresh model list',
             description: target.catalogAt
@@ -618,6 +705,43 @@ export class ProviderManager implements vscode.Disposable {
         updated.models = models && Object.keys(models).length > 0 ? models : undefined;
         break;
       }
+      case 'others': {
+        const others = target.otherCatalog ?? [];
+        if (others.length === 0) {
+          vscode.window.showInformationMessage(
+            `${target.name}'s model list has no other models usable from Claude Code (text, tool calling, ` +
+              `chat completions). Try "Refresh model list".`
+          );
+          return;
+        }
+        const enabled = new Set(target.extraModels ?? []);
+        const picked = await vscode.window.showQuickPick(
+          others.map((m) => ({
+            label: m.id,
+            description: [m.ownedBy, m.contextLength ? `${Math.round(m.contextLength / 1000)}K context` : '']
+              .filter(Boolean)
+              .join(' · '),
+            picked: enabled.has(m.id),
+          })),
+          {
+            title: `${target.name}: non-Claude models for Claude Code`,
+            placeHolder:
+              'Each appears in Claude Code\'s model picker. Claude Code is built for Claude — tool use on ' +
+              'other models works, but less reliably.',
+            canPickMany: true,
+            matchOnDescription: true,
+          }
+        );
+        if (!picked) return;
+        updated.extraModels = picked.length > 0 ? picked.map((i) => i.label) : undefined;
+        if (!updated.extraModels) await stopProxy(target.id);
+        break;
+      }
+      case 'proxylog': {
+        const doc = await vscode.workspace.openTextDocument(proxyLogFile(target.id));
+        await vscode.window.showTextDocument(doc, { preview: true });
+        return;
+      }
       case 'refresh': {
         const key = await this.context.secrets.get(secretKey(target.id));
         if (!key) throw new Error(`No key is stored for ${target.name}. Replace its key first.`);
@@ -656,6 +780,7 @@ export class ProviderManager implements vscode.Disposable {
         if (ok !== 'Remove') return;
         await this.save(this.list().filter((p) => p.id !== target.id));
         await this.context.secrets.delete(secretKey(target.id));
+        await stopProxy(target.id);
         log(`provider removed: ${target.name}`);
         // This window used it: back to the subscription now. Other windows find
         // it gone on their next sync (focus) and offer the reload themselves.
@@ -670,6 +795,16 @@ export class ProviderManager implements vscode.Disposable {
     await this.save(this.list().map((p) => (p.id === target.id ? updated : p)));
     log(`provider edited: ${updated.name} (${action})`);
     this.onDidChange.fire();
+    // Turning other models on is the moment to install and start the proxy — the
+    // background sync below never installs anything on its own.
+    if (action === 'others' && updated.extraModels?.length) {
+      const key = await this.context.secrets.get(secretKey(updated.id));
+      if (key && !(await this.proxyFor(updated, key, true))) {
+        vscode.window.showInformationMessage(
+          `${updated.name}'s non-Claude models stay off until LiteLLM is installed — its Claude models keep working.`
+        );
+      }
+    }
     if (this.active()?.id === target.id) await this.sync();
     else vscode.window.showInformationMessage(`Updated ${updated.name}.`);
   }

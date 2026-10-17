@@ -220,7 +220,10 @@ export class StatusBarManager implements vscode.Disposable {
         provider
           ? `$(credit-card) Billing to **${provider.name}** (\`${provider.baseUrl}\`) — the Anthropic login ` +
             `stays saved but unused until you switch back.` +
-            (describeModels(provider) ? `\n\nModels: ${describeModels(provider)}` : '')
+            (describeModels(provider) ? `\n\nModels: ${describeModels(provider)}` : '') +
+            (provider.extraModels?.length
+              ? ` · plus ${provider.extraModels.length} non-Claude through the local proxy`
+              : '')
           : this.providers.list().length > 0
             ? `$(credit-card) Billing to the Anthropic subscription.`
             : '',

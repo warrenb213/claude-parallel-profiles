@@ -100,12 +100,63 @@ export function parseCatalog(body: unknown): CatalogModel[] {
   );
 }
 
-/** Reads the gateway's model list. The only network request this extension makes. */
+/** A non-Claude model the gateway serves in OpenAI's format — usable through the local proxy. */
+export interface OtherModel {
+  id: string;
+  contextLength?: number;
+  ownedBy?: string;
+}
+
+/**
+ * The non-Claude models worth offering to Claude Code: text out, tool calling
+ * (Claude Code is tools all the way down), and OpenAI's chat-completions endpoint.
+ * Each check applies only where the gateway describes the model at all — Poe
+ * does, in detail; a plain OpenAI-compatible list doesn't, and then every
+ * non-Claude model is offered.
+ */
+export function parseOtherModels(body: unknown): OtherModel[] {
+  const data = (body as { data?: unknown })?.data;
+  if (!Array.isArray(data)) return [];
+  const out: OtherModel[] = [];
+  for (const raw of data) {
+    const m = raw as {
+      id?: unknown;
+      owned_by?: unknown;
+      context_length?: unknown;
+      supported_endpoints?: unknown;
+      supported_features?: unknown;
+      architecture?: { output_modalities?: unknown };
+    };
+    if (typeof m.id !== 'string' || toAnthropic(m.id) || /claude|anthropic/i.test(m.id)) continue;
+    const outputs = m.architecture?.output_modalities;
+    if (Array.isArray(outputs) && !(outputs.length === 1 && outputs[0] === 'text')) continue;
+    if (Array.isArray(m.supported_features) && !m.supported_features.includes('tools')) continue;
+    if (
+      Array.isArray(m.supported_endpoints) &&
+      m.supported_endpoints.length > 0 &&
+      !m.supported_endpoints.includes('/v1/chat/completions')
+    ) {
+      continue;
+    }
+    out.push({
+      id: m.id,
+      contextLength: typeof m.context_length === 'number' ? m.context_length : undefined,
+      ownedBy: typeof m.owned_by === 'string' ? m.owned_by : undefined,
+    });
+  }
+  return out.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/**
+ * Reads the gateway's model list: the Claude models it serves to Claude Code
+ * directly, and the others it serves in OpenAI's format. The only network
+ * request this extension makes itself.
+ */
 export async function fetchCatalog(
   baseUrl: string,
   auth: 'bearer' | 'x-api-key',
   key: string
-): Promise<CatalogModel[]> {
+): Promise<{ claude: CatalogModel[]; others: OtherModel[] }> {
   const url = `${baseUrl.replace(/\/+$/, '')}/v1/models`;
   const res = await fetch(url, {
     headers: {
@@ -115,7 +166,8 @@ export async function fetchCatalog(
     signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) throw new Error(`${url} answered HTTP ${res.status}`);
-  return parseCatalog(await res.json());
+  const body: unknown = await res.json();
+  return { claude: parseCatalog(body), others: parseOtherModels(body) };
 }
 
 /** The newest model of a family. */

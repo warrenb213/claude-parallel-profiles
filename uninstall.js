@@ -345,6 +345,36 @@ function dropTokens(dirs) {
   }
 }
 
+/**
+ * Stops the local LiteLLM proxies (one per provider using non-Claude models). They
+ * run detached, so nothing else ends them, and deleting their directory under them
+ * would leave them serving with the gateway key in memory. Only a PID whose command
+ * line is our venv's `litellm` is signalled — a recycled PID is someone else's.
+ */
+function stopProxies(workRoot) {
+  const root = path.join(workRoot, 'litellm');
+  const bin = path.join(root, 'venv', 'bin', 'litellm');
+  let dirs = [];
+  try {
+    dirs = fs.readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory() && e.name !== 'venv');
+  } catch {
+    return;
+  }
+  for (const d of dirs) {
+    try {
+      const { pid } = JSON.parse(fs.readFileSync(path.join(root, d.name, 'state.json'), 'utf-8'));
+      if (!fs.readFileSync(`/proc/${pid}/cmdline`, 'utf-8').includes(bin)) continue;
+      try {
+        process.kill(-pid, 'SIGTERM'); // its process group
+      } catch {
+        process.kill(pid, 'SIGTERM');
+      }
+    } catch {
+      /* no state, or already gone */
+    }
+  }
+}
+
 function main() {
   // On unsupported platforms the extension activates into an inert mode and never
   // created anything, so there is nothing to revert — and guessing at other OSes'
@@ -362,6 +392,10 @@ function main() {
   const defaultConfig = path.join(home, '.claude.json');
   const store = path.join(home, '.claude-shared');
   const workRoot = path.join(home, '.claude-windows');
+
+  // 0. Stop the proxies before anything is moved or deleted. Cheap, and nothing
+  //    below needs them.
+  stopProxies(workRoot);
 
   const working = workingDirs(workRoot);
   const stores = managedStores(home, path.join(workRoot, '.manifest.json'));
