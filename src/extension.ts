@@ -12,6 +12,7 @@ import { AccountWatcher } from './accountWatcher';
 import { HostState } from './hostState';
 import { ProviderManager } from './providers';
 import { allWorkingDirs, workingRoot } from './workdir';
+import { removeStrayLinks } from './litellm';
 import { log, showLog } from './log';
 
 /**
@@ -145,6 +146,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     ...registry.listForgotten().map((a) => a.dir),
     ...allWorkingDirs(),
   ];
+  removeStrayLinks();
   const warnings = ensureSharedHistory(allDirs());
   if (warnings.length > 0) {
     vscode.window.showWarningMessage(

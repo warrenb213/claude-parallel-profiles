@@ -883,6 +883,13 @@ export class ProviderManager implements vscode.Disposable {
         break;
       }
       case 'proxylog': {
+        if (!fs.existsSync(proxyLogFile(target.id))) {
+          vscode.window.showInformationMessage(
+            `${target.name}'s proxy hasn't run on this host yet — it starts when a window here switches to ` +
+              `${target.name}.`
+          );
+          return;
+        }
         const doc = await vscode.workspace.openTextDocument(proxyLogFile(target.id));
         await vscode.window.showTextDocument(doc, { preview: true });
         return;

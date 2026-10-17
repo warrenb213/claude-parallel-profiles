@@ -139,12 +139,19 @@ export function refreshStore(account: Account, workingDir: string): void {
   }
 }
 
+/**
+ * A window's working dir is named by its workspace hash (12 hex digits). Other
+ * dirs live under the same root — the LiteLLM proxy's `litellm/` — and must not
+ * be taken for one: shared history would be linked into them.
+ */
+export const WORKING_DIR_NAME = /^[0-9a-f]{12}$/;
+
 /** Every working dir on disk — used to sign an account out of all of them. */
 export function allWorkingDirs(): string[] {
   try {
     return fs
       .readdirSync(workingRoot(), { withFileTypes: true })
-      .filter((e) => e.isDirectory())
+      .filter((e) => e.isDirectory() && WORKING_DIR_NAME.test(e.name))
       .map((e) => path.join(workingRoot(), e.name));
   } catch {
     return []; // nothing created yet

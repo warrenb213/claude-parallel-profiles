@@ -101,7 +101,8 @@ function workingDirs(root) {
   try {
     return fs
       .readdirSync(root, { withFileTypes: true })
-      .filter((e) => e.isDirectory())
+      // Window dirs only (workspace hash) — not the LiteLLM proxy's litellm/.
+      .filter((e) => e.isDirectory() && /^[0-9a-f]{12}$/.test(e.name))
       .map((e) => path.join(root, e.name));
   } catch {
     return [];

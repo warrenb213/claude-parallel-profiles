@@ -317,6 +317,28 @@ export async function stopProxy(providerId: string): Promise<void> {
   }
 }
 
+/**
+ * Up to 1.7.1 this dir was mistaken for a window's working dir, and shared
+ * history was linked into it. Removes those links — symlinks only, into the
+ * shared store; the history itself is untouched.
+ */
+export function removeStrayLinks(): void {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root(), { withFileTypes: true });
+  } catch {
+    return; // never installed
+  }
+  for (const e of entries) {
+    if (!e.isSymbolicLink()) continue;
+    try {
+      fs.unlinkSync(path.join(root(), e.name));
+    } catch {
+      /* best effort */
+    }
+  }
+}
+
 export function proxyLogFile(providerId: string): string {
   return path.join(root(), providerId, 'litellm.log');
 }
