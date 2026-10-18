@@ -60,6 +60,8 @@ export interface Provider {
   name: string;
   /** 'anthropic': an Anthropic API key, sent straight to Anthropic. Unset: a gateway. */
   kind?: 'anthropic';
+  /** A gateway added from a preset (see PRESETS); unset for a custom one. */
+  preset?: GatewayPreset;
   baseUrl: string;
   /** How the gateway takes its key: `Authorization: Bearer` or `x-api-key`. */
   auth: 'bearer' | 'x-api-key';
@@ -90,6 +92,60 @@ const CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 const legacySecretKey = (id: string) => `claudeProfiles.provider.${id}`;
 const ANTHROPIC_API = 'https://api.anthropic.com';
 const isNative = (p: Provider) => p.kind === 'anthropic';
+
+/**
+ * Gateways known well enough to set up from a name and a key. Anything else is
+ * added as a custom gateway (base URL + key header asked for).
+ */
+interface PresetDef {
+  label: string;
+  /** Default provider name (status bar). */
+  name: string;
+  detail: string;
+  baseUrl: string;
+  auth: 'bearer' | 'x-api-key';
+  keyHint: string;
+  /** Models come from the gateway's /v1/models (true) or are fixed by `models`. */
+  readsCatalog: boolean;
+  models?: Partial<Record<Family, string>>;
+  /** Extra env the gateway's documented Claude Code setup asks for (must be in MANAGED_ENV). */
+  env?: Record<string, string>;
+}
+
+type GatewayPreset = 'poe' | 'zai';
+
+const PRESETS: Record<GatewayPreset, PresetDef> = {
+  poe: {
+    label: 'Poe',
+    name: 'Poe',
+    detail: 'Claude models on a Poe subscription; other models (GLM, Qwen…) optionally, through a local proxy',
+    baseUrl: 'https://api.poe.com',
+    auth: 'bearer',
+    keyHint: 'From poe.com/api_key',
+    readsCatalog: true,
+  },
+  zai: {
+    label: 'Z.ai GLM Coding Plan',
+    name: 'Z.ai',
+    detail: "GLM models on Z.ai's Anthropic-compatible endpoint — no proxy needed",
+    baseUrl: 'https://api.z.ai/api/anthropic',
+    auth: 'bearer',
+    keyHint: 'An API key from your Z.ai Coding Plan (z.ai → API keys)',
+    // Z.ai's documented Claude Code setup (docs.z.ai/devpack/tool/claude): GLM
+    // in every slot, `[1m]` so Claude Code knows the 1M window, compaction and
+    // a long timeout to match. Its slots are fixed, so no model list is read —
+    // that list would only offer GLM again, through the proxy it doesn't need.
+    models: { opus: 'glm-5.3[1m]', sonnet: 'glm-5.3[1m]', haiku: 'glm-5.3-flash[1m]' },
+    env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '1000000', API_TIMEOUT_MS: '3000000' },
+    readsCatalog: false,
+  },
+};
+
+/** Whether a provider's models come from its /v1/models list (custom gateways and Poe) or are fixed. */
+function readsCatalog(p: Provider): boolean {
+  if (isNative(p)) return false;
+  return p.preset ? PRESETS[p.preset].readsCatalog : true;
+}
 
 /** A model Anthropic serves: an alias (opus, sonnet[1m], default…) or a Claude ID. */
 function isClaudeModel(model: string): boolean {
@@ -167,6 +223,9 @@ const MANAGED_ENV = [
   'ANTHROPIC_DEFAULT_FABLE_MODEL',
   'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS',
   'CLAUDE_CODE_AUTO_MODE_SERVER',
+  // Set by presets (Z.ai).
+  'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
+  'API_TIMEOUT_MS',
 ] as const;
 
 /**
@@ -215,6 +274,7 @@ export function settingsFor(p: Provider, key: string, proxy?: ProxyHandle): Prov
   // Telling it up front gives the same fallback without the notice.
   // (code.claude.com/docs/en/auto-mode-classifier-billing)
   env.CLAUDE_CODE_AUTO_MODE_SERVER = '0';
+  if (p.preset) Object.assign(env, PRESETS[p.preset].env ?? {});
   const top: ProviderSettings['top'] = {};
   if (models.modelOverrides) top.modelOverrides = models.modelOverrides;
   if (models.availableModels) top.availableModels = models.availableModels;
@@ -476,7 +536,7 @@ export class ProviderManager implements vscode.Disposable {
    * had (or none — the manual aliases still apply).
    */
   private async refreshCatalog(provider: Provider, key: string, force = false): Promise<Provider> {
-    if (isNative(provider)) return provider; // Claude Code knows Anthropic's own models
+    if (!readsCatalog(provider)) return provider; // Anthropic itself, or a preset with fixed models
     // A list read before non-Claude models existed (≤ 1.5) has no otherCatalog: re-read it now.
     const fresh = provider.catalogAt && Date.now() - provider.catalogAt < CATALOG_TTL_MS && provider.otherCatalog;
     if (!force && fresh) return provider;
@@ -668,7 +728,7 @@ export class ProviderManager implements vscode.Disposable {
       },
       ...this.list().map((p) => ({
         label: `${mark(current?.id === p.id)}${p.name}`,
-        description: isNative(p) ? 'Anthropic API key, billed per token' : p.baseUrl,
+        description: isNative(p) ? 'Anthropic API key, billed per token' : p.preset ? PRESETS[p.preset].label : p.baseUrl,
         provider: p,
       })),
       { label: '$(add) Add a provider…', add: true },
@@ -690,45 +750,63 @@ export class ProviderManager implements vscode.Disposable {
   }
 
   async addInteractive(): Promise<void> {
-    const kind = (
-      await vscode.window.showQuickPick(
+    type Choice = 'anthropic' | GatewayPreset | 'custom';
+    const choice = (
+      await vscode.window.showQuickPick<vscode.QuickPickItem & { choice: Choice }>(
         [
           {
             label: '$(key) Anthropic API key',
             detail: 'A key from console.anthropic.com — straight to Anthropic, billed per token',
-            choice: 'anthropic' as const,
+            choice: 'anthropic',
           },
+          ...(Object.keys(PRESETS) as GatewayPreset[]).map((id) => ({
+            label: `$(server) ${PRESETS[id].label}`,
+            description: PRESETS[id].baseUrl,
+            detail: PRESETS[id].detail,
+            choice: id,
+          })),
           {
-            label: '$(server) Anthropic-compatible gateway',
-            detail: 'Poe, a company proxy… — a base URL and a key',
-            choice: 'gateway' as const,
+            label: '$(gear) Custom Anthropic-compatible gateway',
+            detail: 'A company proxy or any other endpoint — a base URL and a key',
+            choice: 'custom',
           },
         ],
         { title: 'Add a provider' }
       )
     )?.choice;
-    if (kind === 'anthropic') return this.addAnthropicKey();
-    if (!kind) return;
+    if (!choice) return;
+    if (choice === 'anthropic') return this.addAnthropicKey();
+    return this.addGateway(choice === 'custom' ? undefined : choice);
+  }
 
+  /** A gateway: a preset fills in the URL, key header and models, so only a name and key are asked. */
+  private async addGateway(presetId?: GatewayPreset): Promise<void> {
+    const preset = presetId ? PRESETS[presetId] : undefined;
+    const steps = preset ? 2 : 4;
+    const taken = (v: string) => this.list().some((p) => p.name === v.trim());
     const name = await vscode.window.showInputBox({
-      title: 'Add a provider (1/4): name',
-      prompt: 'Shown in the status bar, e.g. "Poe"',
-      validateInput: (v) =>
-        !v.trim() ? 'Enter a name' : this.list().some((p) => p.name === v.trim()) ? 'That name is taken' : undefined,
+      title: `Add ${preset?.label ?? 'a provider'} (1/${steps}): name`,
+      prompt: 'Shown in the status bar',
+      value: preset && !taken(preset.name) ? preset.name : '',
+      validateInput: (v) => (!v.trim() ? 'Enter a name' : taken(v) ? 'That name is taken' : undefined),
     });
     if (!name) return;
-    const baseUrl = await vscode.window.showInputBox({
-      title: 'Add a provider (2/4): base URL',
-      prompt: 'The Anthropic-compatible endpoint — e.g. https://api.poe.com for Poe',
-      value: 'https://',
-      validateInput: (v) => (/^https?:\/\/[^\s/]+/.test(v.trim()) ? undefined : 'Enter an http(s) URL'),
-    });
-    if (!baseUrl) return;
-    const auth = await this.pickAuth();
-    if (!auth) return;
+    let baseUrl = preset?.baseUrl;
+    let auth = preset?.auth;
+    if (!preset) {
+      baseUrl = await vscode.window.showInputBox({
+        title: 'Add a provider (2/4): base URL',
+        prompt: 'The Anthropic-compatible endpoint',
+        value: 'https://',
+        validateInput: (v) => (/^https?:\/\/[^\s/]+/.test(v.trim()) ? undefined : 'Enter an http(s) URL'),
+      });
+      if (!baseUrl) return;
+      auth = await this.pickAuth();
+      if (!auth) return;
+    }
     const key = await vscode.window.showInputBox({
-      title: 'Add a provider (4/4): key',
-      prompt: 'Stored in VS Code\'s secret storage on this computer',
+      title: `Add ${preset?.label ?? 'a provider'} (${steps}/${steps}): key`,
+      prompt: `${preset?.keyHint ? `${preset.keyHint}. ` : ''}Stored in VS Code's secret storage on this computer`,
       password: true,
       ignoreFocusOut: true,
       validateInput: (v) => (v.trim() ? undefined : 'Enter the key'),
@@ -738,28 +816,31 @@ export class ProviderManager implements vscode.Disposable {
     const provider: Provider = {
       id: crypto.randomBytes(6).toString('hex'),
       name: name.trim(),
-      baseUrl: baseUrl.trim().replace(/\/+$/, ''),
-      auth,
+      baseUrl: baseUrl!.trim().replace(/\/+$/, ''),
+      auth: auth!,
+      ...(presetId && { preset: presetId }),
+      ...(preset?.models && { models: { ...preset.models } }),
     };
     await this.context.secrets.store(this.secretKey(provider.id), key.trim());
     await this.save([...this.list(), provider]);
-    log(`provider added: ${provider.name} (${provider.baseUrl}, ${provider.auth})`);
+    log(`provider added: ${provider.name} (${provider.baseUrl}, ${provider.auth}${presetId ? `, preset ${presetId}` : ''})`);
 
-    // Read what the gateway serves, so the picker shows exactly that.
     let added = provider;
     let found: string;
-    try {
+    if (!readsCatalog(provider)) {
+      found = `models: ${describeModels(provider)}.`;
+    } else {
+      // Read what the gateway serves, so the picker shows exactly that.
       added = await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, title: `Reading ${provider.name}'s model list…` },
         () => this.refreshCatalog(provider, key.trim(), true)
       );
-      found = added.catalog!.length
-        ? `${added.catalog!.length} Claude models usable from Claude Code — ${describeModels(added)}.`
-        : `no Claude models it serves to Claude Code were found. Set model aliases under "Edit or Remove a Provider".`;
-    } catch (err) {
-      found =
-        `its model list couldn't be read (${(err as Error).message}). Set model aliases under ` +
-        `"Edit or Remove a Provider".`;
+      found = added.catalog?.length
+        ? `${added.catalog.length} Claude models usable from Claude Code — ${describeModels(added)}.`
+        : added.catalogAt
+          ? `no Claude models it serves to Claude Code were found. Set model aliases under "Edit or Remove a Provider".`
+          : `its model list couldn't be read (see the Claude Accounts log). Set model aliases under ` +
+            `"Edit or Remove a Provider".`;
     }
 
     const canUse = Boolean(this.settingsFile());
@@ -879,7 +960,7 @@ export class ProviderManager implements vscode.Disposable {
       await vscode.window.showQuickPick(
         providers.map((p) => ({
           label: p.name,
-          description: isNative(p) ? 'Anthropic API key' : p.baseUrl,
+          description: isNative(p) ? 'Anthropic API key' : p.preset ? PRESETS[p.preset].label : p.baseUrl,
           provider: p,
         })),
         { title: 'Edit or remove a provider' }
@@ -900,31 +981,46 @@ export class ProviderManager implements vscode.Disposable {
         isNative(target)
           ? common([])
           : common([
-          { label: '$(link) Change base URL', description: target.baseUrl, action: 'url' },
-          { label: '$(shield) Key header', description: target.auth === 'bearer' ? 'Bearer' : 'x-api-key', action: 'auth' },
+          // A preset's endpoint and key header are what the preset is; only a custom gateway changes them.
+          ...(target.preset
+            ? []
+            : [
+                { label: '$(link) Change base URL', description: target.baseUrl, action: 'url' as Action },
+                {
+                  label: '$(shield) Key header',
+                  description: target.auth === 'bearer' ? 'Bearer' : 'x-api-key',
+                  action: 'auth' as Action,
+                },
+              ]),
           {
             label: target.catalog?.length ? '$(symbol-enum) Default models' : '$(symbol-enum) Model aliases',
             description: describeModels(target) || 'Claude Code defaults',
             action: 'models',
           },
-          {
-            label: '$(extensions) Non-Claude models',
-            description: target.extraModels?.length
-              ? `${target.extraModels.length} enabled, through the local proxy`
-              : `${target.otherCatalog?.length ?? 0} available`,
-            detail: 'Qwen, GLM, DeepSeek… translated for Claude Code by a local LiteLLM proxy',
-            action: 'others',
-          },
-          ...(target.extraModels?.length
-            ? [{ label: '$(output) Show proxy log', action: 'proxylog' as Action }]
+          // Non-Claude models through the proxy, and the model list itself, only
+          // where the models come from the gateway's list (not Z.ai's fixed GLM).
+          ...(readsCatalog(target)
+            ? [
+                {
+                  label: '$(extensions) Non-Claude models',
+                  description: target.extraModels?.length
+                    ? `${target.extraModels.length} enabled, through the local proxy`
+                    : `${target.otherCatalog?.length ?? 0} available`,
+                  detail: 'Qwen, GLM, DeepSeek… translated for Claude Code by a local LiteLLM proxy',
+                  action: 'others' as Action,
+                },
+                ...(target.extraModels?.length
+                  ? [{ label: '$(output) Show proxy log', action: 'proxylog' as Action }]
+                  : []),
+                {
+                  label: '$(refresh) Refresh model list',
+                  description: target.catalogAt
+                    ? `${target.catalog?.length ?? 0} Claude models, read ${new Date(target.catalogAt).toLocaleString()}`
+                    : 'not read yet',
+                  action: 'refresh' as Action,
+                },
+              ]
             : []),
-          {
-            label: '$(refresh) Refresh model list',
-            description: target.catalogAt
-              ? `${target.catalog?.length ?? 0} Claude models, read ${new Date(target.catalogAt).toLocaleString()}`
-              : 'not read yet',
-            action: 'refresh',
-          },
           {
             label: `$(beaker) ${target.disableBetas ? 'Send' : 'Stop sending'} experimental beta headers`,
             description: target.disableBetas ? 'currently off' : 'currently on',

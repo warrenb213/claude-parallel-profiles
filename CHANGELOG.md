@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.9.0 — 2026-10-18
+
+### Added
+
+- **Prebaked providers.** *Add a Provider* now lists, besides an Anthropic API key: **Poe** and **Z.ai GLM Coding Plan**, each set up from just a name and a key, and **Custom** for any other Anthropic-compatible endpoint (the previous flow).
+  - **Z.ai** follows Z.ai's documented Claude Code setup: its Anthropic-compatible endpoint, Bearer key, GLM in the opus/sonnet/haiku slots (`glm-5.3[1m]`, `glm-5.3-flash[1m]` for haiku) with the 1M context window, matching auto-compaction and a long request timeout. GLM is served natively — no proxy. The slots can be changed under *Model aliases*.
+  - **Poe** keeps reading its model list; its non-Claude models stay opt-in through the local proxy.
+  - A preset's endpoint and key header are fixed; a custom gateway can still change both.
+
+### Fixed
+
+- Adding a gateway whose model list couldn't be read now says so, instead of failing on the missing list.
+
 ## 1.8.5 — 2026-10-17
 
 ### Fixed
