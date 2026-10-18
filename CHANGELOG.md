@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.8.5 — 2026-10-17
+
+### Fixed
+
+- **"API Error: Part of the response never arrived" with non-Claude models on Poe.** Poe's stream marks the reply finished (`finish_reason: "tool_calls"`) right after the first tool call, then streams the next ones. LiteLLM believed the early finish and dropped the later tool calls' block starts — names and ids included — so Claude Code discarded the rest of the reply whenever the model called several tools at once. The proxy's hook now holds such an early finish back until the reply really ends; standard streams pass through unchanged.
+
 ## 1.8.4 — 2026-10-17
 
 ### Fixed
