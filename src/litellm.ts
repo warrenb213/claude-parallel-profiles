@@ -180,6 +180,19 @@ export interface ProxyHandle {
 interface ProxyState extends ProxyHandle {
   pid: number;
   hash: string;
+  /** The extension version that started it (absent: before 1.8.3). */
+  version?: string;
+}
+
+/** a < b, comparing dotted numeric versions; anything unparsable counts as oldest. */
+function olderThan(a: string | undefined, b: string): boolean {
+  const pa = (a ?? '').split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  if (!a || pa.some(isNaN)) return true;
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) < (pb[i] ?? 0);
+  }
+  return false;
 }
 
 /** Alive AND still our LiteLLM — a recycled PID must not count. */
@@ -199,6 +212,19 @@ async function healthy(port: number): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * For a proxy that is running: a busy one (a large request being translated,
+ * many streams) can miss one 2-second check. Killing it then would cut every
+ * stream it carries — so it gets three chances before it counts as dead.
+ */
+async function responsive(port: number): Promise<boolean> {
+  for (let i = 0; i < 3; i++) {
+    if (await healthy(port)) return true;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  return false;
 }
 
 function portFree(port: number): Promise<boolean> {
@@ -259,7 +285,9 @@ export async function ensureProxy(
   config: object,
   gatewayKey: string,
   /** The schema_fix.py this extension version ships — copied next to the config, which loads it. */
-  hookFile: string
+  hookFile: string,
+  /** This extension's version: an older one never rebuilds a proxy a newer one started. */
+  extVersion: string
 ): Promise<ProxyHandle> {
   const dir = path.join(root(), providerId);
   return withLock(path.join(dir, 'start.lock'), 3 * 60_000, async () => {
@@ -271,8 +299,17 @@ export async function ensureProxy(
     // The hook is part of what runs: a new version of it restarts the proxy too.
     const hash = sha256(`${configText}\0${sha256(gatewayKey)}\0${sha256(hook)}`);
     const state = readState(dir);
-    if (state && state.hash === hash && isOurProxy(state.pid) && (await healthy(state.port))) {
-      return { port: state.port, masterKey: state.masterKey };
+    // Windows on this host share the proxy, and each one brings it in line on
+    // focus. A window still running an OLDER extension version (not reloaded
+    // since an update) must not rebuild a proxy a newer one started — they
+    // would take turns restarting it, cutting every stream each time. It keeps
+    // the same port and key either way, so reusing it is always safe.
+    if (state && isOurProxy(state.pid)) {
+      const keep = state.hash === hash || olderThan(extVersion, state.version ?? '0');
+      if (keep && (await responsive(state.port))) {
+        if (state.hash !== hash) log(`litellm[${providerId}]: kept the proxy a newer extension (${state.version}) started`);
+        return { port: state.port, masterKey: state.masterKey };
+      }
     }
     if (state) await stopPid(state.pid);
 
@@ -300,7 +337,7 @@ export async function ensureProxy(
     fs.closeSync(out);
     child.unref();
     if (!child.pid) throw new Error('LiteLLM did not start');
-    const next: ProxyState = { pid: child.pid, port, masterKey, hash };
+    const next: ProxyState = { pid: child.pid, port, masterKey, hash, version: extVersion };
     fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify(next), { mode: 0o600 });
     log(`litellm[${providerId}]: started pid ${child.pid} on 127.0.0.1:${port}`);
 

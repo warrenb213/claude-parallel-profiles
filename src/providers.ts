@@ -276,6 +276,10 @@ export class ProviderManager implements vscode.Disposable {
     private readonly state: HostState
   ) {}
 
+  private version(): string {
+    return String((this.context.extension?.packageJSON as { version?: unknown } | undefined)?.version ?? '0');
+  }
+
   /** The account this window runs — providers belong to it, on this host. */
   private email(): string | undefined {
     const dir = this.binding.getEnvDir();
@@ -525,9 +529,9 @@ export class ProviderManager implements vscode.Disposable {
     return interactive
       ? vscode.window.withProgress(
           { location: vscode.ProgressLocation.Notification, title: `Starting the local proxy for ${p.name}…` },
-          () => ensureProxy(p.id, config, key, path.join(this.context.extensionPath, 'litellm', 'schema_fix.py'))
+          () => ensureProxy(p.id, config, key, path.join(this.context.extensionPath, 'litellm', 'schema_fix.py'), this.version())
         )
-      : ensureProxy(p.id, config, key, path.join(this.context.extensionPath, 'litellm', 'schema_fix.py'));
+      : ensureProxy(p.id, config, key, path.join(this.context.extensionPath, 'litellm', 'schema_fix.py'), this.version());
   }
 
   /** Points this window at `provider` (undefined = its Anthropic login) and reloads it. */

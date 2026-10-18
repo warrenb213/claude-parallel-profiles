@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.8.3 — 2026-10-17
+
+### Fixed
+
+- **"claude-sonnet-4-6 is temporarily unavailable (connection failed)" in auto mode, and dropped replies.** Every window on a host shares the provider's local proxy and brings it in line whenever it gains focus. Two windows running different extension versions (one not reloaded since an update) each rebuilt the proxy their own way, taking turns restarting it — five restarts in three minutes were seen — and every request in flight, auto mode's classifier checks included, failed with "connection failed". The proxy now records which version started it, and an older version reuses a newer one's proxy instead of rebuilding it (port and key are unchanged either way). A running proxy that misses one 2-second health check (busy, not dead) also gets three chances before it is restarted. Windows still running ≤ 1.8.2 code need one reload to stop taking part.
+
 ## 1.8.2 — 2026-10-17
 
 ### Changed
