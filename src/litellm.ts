@@ -118,18 +118,25 @@ async function findPython(): Promise<string | undefined> {
 
 /**
  * Serialises work across windows (each its own extension host) with an
- * exclusive-create lock file. A lock older than `staleMs` is from a host that
- * died mid-way and is taken over.
+ * exclusive-create lock file holding the owner's pid. A window reloading
+ * mid-way leaves its lock behind, so a lock whose owner is gone is taken over
+ * at once — waiting it out left a proxy without its hook in place for minutes
+ * after an update. A lock older than `staleMs` is taken over regardless (an
+ * owner whose pid can't be read, or a recycled pid).
  */
 async function withLock<T>(file: string, staleMs: number, fn: () => Promise<T>): Promise<T> {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   for (;;) {
     try {
-      fs.closeSync(fs.openSync(file, 'wx', 0o600));
+      const fd = fs.openSync(file, 'wx', 0o600);
+      fs.writeSync(fd, String(process.pid));
+      fs.closeSync(fd);
       break;
     } catch {
       try {
-        if (Date.now() - fs.statSync(file).mtimeMs > staleMs) fs.rmSync(file, { force: true });
+        const owner = Number(fs.readFileSync(file, 'utf-8').trim());
+        const gone = owner > 0 && owner !== process.pid && !alive(owner);
+        if (gone || Date.now() - fs.statSync(file).mtimeMs > staleMs) fs.rmSync(file, { force: true });
       } catch {
         /* released meanwhile */
       }
@@ -193,6 +200,15 @@ function olderThan(a: string | undefined, b: string): boolean {
     if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) < (pb[i] ?? 0);
   }
   return false;
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM'; // exists, someone else's
+  }
 }
 
 /** Alive AND still our LiteLLM — a recycled PID must not count. */

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.8.4 — 2026-10-17
+
+### Fixed
+
+- **A window reloading mid-start could leave the proxy wrong for three minutes.** The proxy's start lock was only taken over once it was three minutes old. A window reloaded while starting the proxy (as after an update: the old code started one without the schema hook in its last seconds) left the lock behind, and the updated windows waited it out while every request failed — the chat looked hung. The lock now records its owner's process, and a lock whose owner is gone is taken over at once; the three-minute rule remains only as a fallback.
+
 ## 1.8.3 — 2026-10-17
 
 ### Fixed
