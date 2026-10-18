@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.8.2 — 2026-10-17
+
+### Changed
+
+- **No more auto mode "this session isn't eligible" notice on gateways.** Auto mode now asks Anthropic's API to run its safety checks inside each request; a gateway such as Poe can't, so Claude Code fell back to its own classifier requests after holding the first checked action behind that notice. Gateway windows now set `CLAUDE_CODE_AUTO_MODE_SERVER=0`, which gives the same fallback without the notice — every action is still checked, and the classifier requests are billed by the gateway as before. Not set for the Anthropic login or an Anthropic API key, and removed when a window switches back.
+
 ## 1.8.1 — 2026-10-17
 
 ### Fixed

@@ -166,6 +166,7 @@ const MANAGED_ENV = [
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
   'ANTHROPIC_DEFAULT_FABLE_MODEL',
   'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS',
+  'CLAUDE_CODE_AUTO_MODE_SERVER',
 ] as const;
 
 /**
@@ -206,6 +207,14 @@ export function settingsFor(p: Provider, key: string, proxy?: ProxyHandle): Prov
       };
   Object.assign(env, models.env);
   if (p.disableBetas) env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = '1';
+  // Auto mode asks Anthropic's API to run its safety checks inside each request
+  // (the `safeguards` field → `safeguard_results`). A gateway can't — Poe isn't
+  // Anthropic, and a translated model isn't even the Messages API — so Claude
+  // Code falls back to its own classifier requests (every action is still
+  // checked), after holding the first one behind an "isn't eligible" notice.
+  // Telling it up front gives the same fallback without the notice.
+  // (code.claude.com/docs/en/auto-mode-classifier-billing)
+  env.CLAUDE_CODE_AUTO_MODE_SERVER = '0';
   const top: ProviderSettings['top'] = {};
   if (models.modelOverrides) top.modelOverrides = models.modelOverrides;
   if (models.availableModels) top.availableModels = models.availableModels;
