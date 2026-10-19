@@ -1,3 +1,6 @@
+import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
 import { execFile } from 'child_process';
 import { log } from './log';
 import { readIdentity } from './accounts';
@@ -16,6 +19,35 @@ export interface AuthStatus {
   email?: string;
   orgName?: string;
   subscriptionType?: string;
+}
+
+/**
+ * The Claude Code extension's own binary — the version this window's chats
+ * actually run. A `claude` on PATH can be far older (one host had an npm
+ * global 2.1.81 next to the extension's 2.1.301, and the old one started
+ * headless gateway runs in "default" permission mode, so every edit was
+ * denied). Undefined when that extension isn't installed here.
+ */
+export function bundledClaude(): string | undefined {
+  const ext = vscode.extensions.getExtension('anthropic.claude-code');
+  if (!ext) return undefined;
+  const bin = path.join(ext.extensionPath, 'resources', 'native-binary', process.platform === 'win32' ? 'claude.exe' : 'claude');
+  try {
+    fs.accessSync(bin, fs.constants.X_OK);
+    return bin;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Shell arguments that run Claude Code with `args`: the extension's binary when
+ * there is one, else `claude` from PATH. Through a login shell either way, so
+ * the commands an agent runs see the user's PATH (nvm and the like).
+ */
+export function claudeShellArgs(args: string[]): string[] {
+  const bin = bundledClaude();
+  return bin ? ['-lc', 'exec "$0" "$@"', bin, ...args] : ['-lc', 'exec claude "$@"', 'claude', ...args];
 }
 
 /** Runs a claude CLI command through a login shell so nvm/PATH resolve. */

@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.14.0 — 2026-10-19
+
+### Added
+
+- **Worker transcripts from the account hover.** Each agent task's worker name opens that task's transcript; each worker under *Workers* shows how many tasks and consultations it has in this window and lists them to open. A task's transcript is its run made readable — the worker's messages, each tool call with its command or edit, results and thinking collapsed, the report and changes — and follows along while the task runs; a consultation's shows the question, context and answer. Also *Claude Accounts: Show Worker Transcripts*, and *Open transcript* in *Show Agent Tasks*.
+- **Agent tasks can take gitignored files they need.** `start_task` takes `include`: files or folders (repo-relative) copied into the worker's copy even when gitignored, within their own budget (5 MB a file, 100 MB and 2,000 files in all; a folder over it is refused whole). Files the task or context names by absolute path inside the repo are copied in too, and those paths are rewritten to the worker's copy — a task that pointed GLM at a plan in a 162 GB `.temp` got a worker that couldn't see it.
+
+### Fixed
+
+- **A GLM worker couldn't write any file.** Agent tasks and login workers ran the `claude` on PATH. On one host that was an npm global Claude Code 2.1.81 beside the extension's 2.1.301, and 2.1.81 started the headless gateway run in "default" permission mode despite `--permission-mode auto` — every edit and redirect was denied, and the worker reported it was blocked after 30 turns. They now run the Claude Code extension's own binary (the version the chats use), falling back to PATH only where that extension isn't installed, and a run that starts in any mode but auto is stopped at once with the reason. Reproduced on that host: 2.1.81 denied the write, 2.1.301 made it.
+
 ## 1.13.2 — 2026-10-19
 
 ### Changed

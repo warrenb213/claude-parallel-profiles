@@ -13,6 +13,7 @@ import { HostState } from './hostState';
 import { ProviderManager } from './providers';
 import { DelegateServer } from './delegate';
 import { AgentTasks } from './agentTasks';
+import { Transcripts } from './transcripts';
 import { allWorkingDirs, workingRoot } from './workdir';
 import { removeStrayLinks } from './litellm';
 import { log, showLog } from './log';
@@ -202,6 +203,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     cmd('claudeProfiles.addProvider', () => providers.addInteractive()),
     cmd('claudeProfiles.editProvider', () => providers.editInteractive()),
     cmd('claudeProfiles.showAgentTasks', () => agentTasks.showInteractive()),
+    // The account hover links each task and worker to its transcripts.
+    cmd('claudeProfiles.showAgentTaskTranscript', (id?: string) => (id ? transcripts.openTask(id) : transcripts.pick())),
+    cmd('claudeProfiles.showWorkerTranscripts', (worker?: string) => transcripts.pick(worker)),
     cmd('claudeProfiles.showUsage', async () => {
       const report = await workers.usageReport();
       const doc = await vscode.workspace.openTextDocument({ content: `Provider usage\n\n${report}\n`, language: 'plaintext' });
@@ -278,8 +282,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     (worker: string, inTok: number, outTok: number): void => workers.usage.count(worker, 'task', inTok, outTok)
   );
   const workers: DelegateServer = new DelegateServer(providers, () => providers.ownConfigDir(), agentTasks);
-  statusBar.setAgentTasks(agentTasks);
-  context.subscriptions.push(workers, agentTasks);
+  const transcripts: Transcripts = new Transcripts(agentTasks, workers);
+  statusBar.setAgentTasks(agentTasks, transcripts, workers.onDidConsult.event);
+  context.subscriptions.push(workers, agentTasks, transcripts);
   void providers.migrate().then(async () => {
     await providers.sync();
     await workers.reconcile();

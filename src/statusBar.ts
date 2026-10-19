@@ -6,6 +6,7 @@ import { getAuthStatus, AuthStatus } from './cli';
 import { defaultSourceDir } from './capture';
 import { ProviderManager, describeLogin, describeModels } from './providers';
 import type { AgentTasks } from './agentTasks';
+import type { Transcripts } from './transcripts';
 
 /** Marketplace id — the hover links to the extension's own page with it. */
 const EXTENSION_ID = 'DercasDrol.claude-parallel-accounts';
@@ -172,11 +173,16 @@ export class StatusBarManager implements vscode.Disposable {
   }
 
   private agentTasks: AgentTasks | undefined;
+  private transcripts: Transcripts | undefined;
 
-  /** Agent tasks join the account's card: their state in the hover, a count in the text while active. */
-  setAgentTasks(tasks: AgentTasks): void {
+  /**
+   * Agent tasks join the account's card: their state in the hover, a count in the
+   * text while active. Each task and worker there links to its transcripts.
+   */
+  setAgentTasks(tasks: AgentTasks, transcripts: Transcripts, consulted: vscode.Event<unknown>): void {
     this.agentTasks = tasks;
-    this.disposables.push(tasks.onDidChange.event(() => this.render()));
+    this.transcripts = transcripts;
+    this.disposables.push(tasks.onDidChange.event(() => this.render()), consulted(() => this.render()));
   }
 
   private render(): void {
@@ -245,7 +251,11 @@ export class StatusBarManager implements vscode.Disposable {
             : `$(credit-card) Billing to **Anthropic** — ${describeLogin(dir)}.`,
         workers.length
           ? `$(organization) Workers: ${workers
-              .map((w) => (w.agent ? `${w.id} _(+agent tasks)_` : w.id))
+              .map((w) => {
+                const n = this.transcripts?.count(w.id) ?? 0;
+                const link = `[${w.id}](command:claudeProfiles.showWorkerTranscripts?${encodeURIComponent(JSON.stringify([w.id]))} "Its tasks and consultations in this window")`;
+                return `${link}${n ? ` (${n})` : ''}${w.agent ? ' _(+agent tasks)_' : ''}`;
+              })
               .join(', ')}`
           : '',
         tasks?.lines.length ? `**Agent tasks**${tasks.active ? ` — ${tasks.active} active` : ''}\n\n${tasks.lines.map((l) => `- ${l}`).join('\n')}` : '',

@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as http from 'http';
 import * as crypto from 'crypto';
 import { spawn } from 'child_process';
+import { claudeShellArgs } from './cli';
 import { log } from './log';
 import type { AgentTasks } from './agentTasks';
 import { UsageBook, zaiQuota, fromRateLimitInfo } from './usage';
@@ -160,7 +161,7 @@ export function callLoginWorker(
   env.CLAUDE_CONFIG_DIR = accountDir;
   const started = Date.now();
   return new Promise((resolve, reject) => {
-    const child = spawn(process.env.SHELL || '/bin/bash', ['-lc', 'exec claude "$@"', 'claude', ...args], {
+    const child = spawn(process.env.SHELL || '/bin/bash', claudeShellArgs(args), {
       cwd: accountDir,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -206,6 +207,23 @@ export function callLoginWorker(
   });
 }
 
+/** One `delegate` call, kept for its transcript (the account hover links to them). */
+export interface Consult {
+  n: number;
+  worker: string;
+  caller: 'lead' | 'agent';
+  at: number;
+  task: string;
+  context?: string;
+  answer?: string;
+  error?: string;
+  ms?: number;
+  inTok?: number;
+  outTok?: number;
+}
+
+const KEEP_CONSULTS = 50;
+
 export class DelegateServer implements vscode.Disposable {
   private server: http.Server | undefined;
   private port = 0;
@@ -215,6 +233,9 @@ export class DelegateServer implements vscode.Disposable {
   private readonly workerToken = crypto.randomBytes(24).toString('hex');
   private calls = 0;
   readonly usage = new UsageBook();
+  /** This window's latest consultations, oldest first. */
+  readonly consults: Consult[] = [];
+  readonly onDidConsult = new vscode.EventEmitter<Consult>();
   /** Open GET event streams (sessions listening for server notifications). */
   private readonly streams = new Set<http.ServerResponse>();
   private heartbeat: NodeJS.Timeout | undefined;
@@ -412,16 +433,25 @@ export class DelegateServer implements vscode.Disposable {
         name: 'start_task',
         description:
           'Start an agent task: a worker model (another provider the user enabled) runs Claude Code headless on a ' +
-          "(it can consult other workers itself, answers only — e.g. Claude on the user's subscription) " +
           "scratch git worktree of this repo — HEAD plus the user's uncommitted changes — with auto-mode tool use " +
-          '(edits, commands checked by a safety classifier). Returns a task_id at once; tasks take minutes. ' +
-          'The worker sees only the repo and what you put in task/context. Get the result with wait_task.',
+          '(edits, commands checked by a safety classifier). It can consult other workers itself, answers only ' +
+          "(e.g. Claude on the user's subscription). Returns a task_id at once; tasks take minutes. The worker " +
+          'sees only its copy and what you put in task/context: gitignored files (scratch folders, build output) ' +
+          'are not in it unless listed in `include` — or named in task/context by absolute path, which copies ' +
+          'that file in. Get the result with wait_task.',
         inputSchema: {
           type: 'object',
           properties: {
             worker: { type: 'string', description: `An agent-enabled worker — see list_workers (at session start: ${ids.join(', ')}).` },
             task: { type: 'string', description: 'The job, stated completely, with how to verify it.' },
             context: { type: 'string', description: 'Anything it needs beyond the repo itself.' },
+            include: {
+              type: 'array',
+              items: { type: 'string' },
+              description:
+                'Files or folders (relative to the repo root) to copy into the worker\'s copy even though they are ' +
+                'gitignored — only what the task needs (5 MB a file, 100 MB and 2,000 files in all). Not with `after`.',
+            },
             after: {
               type: 'string',
               description:
@@ -490,11 +520,12 @@ export class DelegateServer implements vscode.Disposable {
           const context = typeof args.context === 'string' ? args.context : undefined;
           if (task.length + (context?.length ?? 0) > MAX_CONTEXT_CHARS) return text(`Too much to send (limit ${MAX_CONTEXT_CHARS} characters).`, true);
           const after = typeof args.after === 'string' && args.after ? args.after : undefined;
-          const r = await this.agents.start(w.id, task, context, after);
+          const include = Array.isArray(args.include) ? args.include.filter((x): x is string => typeof x === 'string' && x.trim() !== '').map((x) => x.trim()) : [];
+          const r = await this.agents.start(w.id, task, context, after, include);
           return text(
             `${r.queued ? 'Queued' : 'Started'} task ${r.id} on ${w.id}${after ? `, building on ${after}` : ''}` +
               `${r.queued ? (after ? ` — it starts when ${after} is done` : ' — it starts when a slot frees') : ''}. ` +
-              `Call wait_task with task_id "${r.id}" for its result.`
+              `Call wait_task with task_id "${r.id}" for its result.${r.note ? `\n\nSnapshot: ${r.note}` : ''}`
           );
         }
         if (name === 'wait_task') {
@@ -533,8 +564,13 @@ export class DelegateServer implements vscode.Disposable {
     }
     this.calls++;
     const busy = vscode.window.setStatusBarMessage(`$(sync~spin) Worker ${w.id}…`);
+    const consult: Consult = { n: this.calls, worker: w.id, caller, at: Date.now(), task, context };
+    this.consults.push(consult);
+    if (this.consults.length > KEEP_CONSULTS) this.consults.shift();
+    this.onDidConsult.fire(consult);
     try {
       const r = await run();
+      Object.assign(consult, { answer: r.text, ms: r.ms, inTok: r.inputTokens, outTok: r.outputTokens });
       if (r.rateLimit) {
         const windows = fromRateLimitInfo(r.rateLimit);
         if (windows.length) this.usage.set(w.providerName, { windows, source: "Claude Code's rate-limit report", at: Date.now() });
@@ -543,15 +579,18 @@ export class DelegateServer implements vscode.Disposable {
       log(`workers: ${w.id} answered${caller === 'agent' ? ' an agent task' : ''} in ${r.ms} ms (${r.inputTokens ?? '?'} in / ${r.outputTokens ?? '?'} out tokens)`);
       return text(`${r.text || '(empty answer)'}\n\n— ${w.id} · ${r.ms} ms · ${r.inputTokens ?? '?'} in / ${r.outputTokens ?? '?'} out tokens`);
     } catch (err) {
+      consult.error = (err as Error).message;
       log(`workers: ${w.id} failed — ${(err as Error).message}`);
       return text(`Worker ${w.id} failed: ${(err as Error).message}`, true);
     } finally {
       busy.dispose();
+      this.onDidConsult.fire(consult);
     }
   }
 
   dispose(): void {
     this.subscription.dispose();
+    this.onDidConsult.dispose();
     const dir = this.configDir();
     if (dir) {
       try {
