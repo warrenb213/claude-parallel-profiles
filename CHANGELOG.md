@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.9.1 — 2026-10-19
+
+### Added
+
+- **Connection test.** Adding a provider now sends it one tiny request (a single output token) exactly as Claude Code would — same endpoint, key header and model (the cheapest configured one) — and shows the provider's own answer if it fails, with a plain hint: key rejected, endpoint or model not found, or rate-limited / plan or balance not covering it. Previously such a failure only showed in the first chat as an apparent hang, because Claude Code retries a 429 up to 11 times. *Edit or Remove a Provider → Test connection* runs it any time. A provider whose test failed can still be used, with a warning.
+
+### Fixed
+
+- Adding a custom gateway that has no readable model list failed with an error (a regression in 1.9.0); it again says the list couldn't be read and points to model aliases.
+
 ## 1.9.0 — 2026-10-18
 
 ### Added

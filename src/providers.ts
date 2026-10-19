@@ -309,6 +309,70 @@ export function describeModels(p: Provider): string {
     .join(', ');
 }
 
+export type TestResult =
+  | { ok: true; model: string; ms: number }
+  | { ok: false; model: string; status?: number; message: string; hint: string };
+
+/** The model a connection test asks for: the cheapest one Claude Code would use here, as it sends it. */
+function testModel(p: Provider): string {
+  if (isNative(p)) return 'claude-haiku-4-5';
+  const pick =
+    p.models?.haiku ??
+    (p.catalog ? newest(p.catalog, 'haiku')?.gatewayId : undefined) ??
+    p.models?.sonnet ??
+    (p.catalog ? newest(p.catalog, 'sonnet')?.gatewayId : undefined) ??
+    p.models?.opus ??
+    'claude-sonnet-4-6';
+  return pick.replace(/(\[1m\])+$/i, ''); // Claude Code's own marker for the 1M window, never sent
+}
+
+/**
+ * One request to the provider exactly as Claude Code would send it — same
+ * endpoint, key header and model — asking for a single output token. Catches a
+ * wrong key, an inactive plan or empty balance, a wrong endpoint or an unknown
+ * model when the provider is added, instead of as a "hang" in the first chat:
+ * Claude Code retries a 429 up to 11 times, quietly.
+ */
+export async function testProvider(p: Provider, key: string): Promise<TestResult> {
+  const model = testModel(p);
+  const url = `${(isNative(p) ? ANTHROPIC_API : p.baseUrl).replace(/\/+$/, '')}/v1/messages`;
+  const headers: Record<string, string> = { 'content-type': 'application/json', 'anthropic-version': '2023-06-01' };
+  if (isNative(p) || p.auth === 'x-api-key') headers['x-api-key'] = key;
+  else headers.authorization = `Bearer ${key}`;
+  const started = Date.now();
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (res.ok) return { ok: true, model, ms: Date.now() - started };
+    const text = await res.text();
+    let message = text.trim();
+    try {
+      const body = JSON.parse(text) as { error?: { message?: unknown } | string; message?: unknown };
+      const m = typeof body.error === 'object' ? body.error?.message : (body.error ?? body.message);
+      if (typeof m === 'string' && m) message = m;
+    } catch {
+      /* not JSON: keep the text */
+    }
+    const hint =
+      res.status === 401 || res.status === 403
+        ? 'The key was rejected — check it, and that it belongs to this provider.'
+        : res.status === 404
+          ? `The endpoint or the model "${model}" wasn't found — check the base URL and model aliases.`
+          : res.status === 429
+            ? "Rate-limited — or the account's plan or balance doesn't cover this. Claude Code would keep retrying this and look hung."
+            : res.status === 400
+              ? `The request was refused — often a model name ("${model}") this provider doesn't serve.`
+              : 'The provider answered with an error.';
+    return { ok: false, model, status: res.status, message: message.slice(0, 300), hint };
+  } catch (err) {
+    return { ok: false, model, message: (err as Error).message, hint: `Couldn't reach ${url}.` };
+  }
+}
+
 function formatModels(m: Provider['models']): string {
   return FAMILIES
     .filter((k) => m?.[k])
@@ -749,6 +813,38 @@ export class ProviderManager implements vscode.Disposable {
     await this.useInWindow(picked.provider);
   }
 
+  /** Runs testProvider with progress; a failure is reported here, a success left to the caller. */
+  private async testInteractive(p: Provider, key: string): Promise<TestResult> {
+    const r = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: `Testing ${p.name}…` },
+      () => testProvider(p, key)
+    );
+    if (r.ok) {
+      log(`provider ${p.name}: test OK (${r.model}, ${r.ms} ms)`);
+      return r;
+    }
+    log(`provider ${p.name}: test FAILED (${r.model}) ${r.status ?? ''} ${r.message}`);
+    vscode.window.showWarningMessage(
+      `${p.name} didn't answer a test request${r.status ? ` (HTTP ${r.status})` : ''}: ${r.message}\n\n${r.hint}`,
+      { modal: true }
+    );
+    return r;
+  }
+
+  /** After adding: test it, then offer it for this window (a failed test still allows it, with a warning). */
+  private async offerNewProvider(p: Provider, key: string, what: string): Promise<void> {
+    const { ok } = await this.testInteractive(p, key);
+    const canUse = Boolean(this.settingsFile());
+    const msg = ok
+      ? `Added ${p.name}: ${what}`
+      : `Added ${p.name}, but its test failed — fix it under "Edit or Remove a Provider" (Replace key, Test connection).`;
+    const pick = await (ok ? vscode.window.showInformationMessage : vscode.window.showWarningMessage)(
+      msg,
+      ...(canUse ? [ok ? 'Use in this window' : 'Use in this window anyway'] : [])
+    );
+    if (pick) await this.useInWindow(p);
+  }
+
   async addInteractive(): Promise<void> {
     type Choice = 'anthropic' | GatewayPreset | 'custom';
     const choice = (
@@ -831,24 +927,22 @@ export class ProviderManager implements vscode.Disposable {
       found = `models: ${describeModels(provider)}.`;
     } else {
       // Read what the gateway serves, so the picker shows exactly that.
-      added = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: `Reading ${provider.name}'s model list…` },
-        () => this.refreshCatalog(provider, key.trim(), true)
-      );
-      found = added.catalog?.length
-        ? `${added.catalog.length} Claude models usable from Claude Code — ${describeModels(added)}.`
-        : added.catalogAt
-          ? `no Claude models it serves to Claude Code were found. Set model aliases under "Edit or Remove a Provider".`
-          : `its model list couldn't be read (see the Claude Accounts log). Set model aliases under ` +
-            `"Edit or Remove a Provider".`;
+      try {
+        added = await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: `Reading ${provider.name}'s model list…` },
+          () => this.refreshCatalog(provider, key.trim(), true)
+        );
+        found = added.catalog?.length
+          ? `${added.catalog.length} Claude models usable from Claude Code — ${describeModels(added)}.`
+          : `no Claude models it serves to Claude Code were found. Set model aliases under "Edit or Remove a Provider".`;
+      } catch (err) {
+        found =
+          `its model list couldn't be read (${(err as Error).message}). Set model aliases under ` +
+          `"Edit or Remove a Provider".`;
+      }
     }
 
-    const canUse = Boolean(this.settingsFile());
-    const pick = await vscode.window.showInformationMessage(
-      `Added ${provider.name}: ${found}`,
-      ...(canUse ? [`Use in this window`] : [])
-    );
-    if (pick) await this.useInWindow(added);
+    await this.offerNewProvider(added, key.trim(), found);
   }
 
   private static validateAnthropicKey(v: string): string | undefined {
@@ -883,12 +977,11 @@ export class ProviderManager implements vscode.Disposable {
     await this.context.secrets.store(this.secretKey(provider.id), key.trim());
     await this.save([...this.list(), provider]);
     log(`provider added: ${provider.name} (Anthropic API key)`);
-    const canUse = Boolean(this.settingsFile());
-    const pick = await vscode.window.showInformationMessage(
-      `Added ${provider.name}. Windows using it bill your Anthropic API key per token; the account's login stays saved.`,
-      ...(canUse ? [`Use in this window`] : [])
+    await this.offerNewProvider(
+      provider,
+      key.trim(),
+      "windows using it bill your Anthropic API key per token; the account's login stays saved."
     );
-    if (pick) await this.useInWindow(provider);
   }
 
   private async pickAuth(current?: Provider['auth']): Promise<Provider['auth'] | undefined> {
@@ -968,9 +1061,10 @@ export class ProviderManager implements vscode.Disposable {
     )?.provider;
     if (!target) return;
 
-    type Action = 'key' | 'url' | 'auth' | 'models' | 'others' | 'refresh' | 'proxylog' | 'betas' | 'rename' | 'remove';
+    type Action = 'test' | 'key' | 'url' | 'auth' | 'models' | 'others' | 'refresh' | 'proxylog' | 'betas' | 'rename' | 'remove';
     type ActionItem = vscode.QuickPickItem & { action: Action };
     const common = (items: ActionItem[]): ActionItem[] => [
+      { label: '$(pulse) Test connection', description: 'one tiny request, as Claude Code sends it', action: 'test' },
       { label: '$(key) Replace key', action: 'key' },
       ...items,
       { label: '$(edit) Rename', action: 'rename' },
@@ -1035,6 +1129,13 @@ export class ProviderManager implements vscode.Disposable {
 
     const updated: Provider = { ...target };
     switch (action) {
+      case 'test': {
+        const key = await this.context.secrets.get(this.secretKey(target.id));
+        if (!key) throw new Error(`No key is stored for ${target.name}. Replace its key first.`);
+        const r = await this.testInteractive(target, key);
+        if (r.ok) vscode.window.showInformationMessage(`${target.name} answered with ${r.model} in ${r.ms} ms.`);
+        return;
+      }
       case 'key': {
         const key = await vscode.window.showInputBox({
           title: `New key for ${target.name}`,
