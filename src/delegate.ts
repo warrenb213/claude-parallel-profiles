@@ -3,8 +3,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as http from 'http';
 import * as crypto from 'crypto';
+import { spawn } from 'child_process';
 import { log } from './log';
 import type { AgentTasks } from './agentTasks';
+import { UsageBook, zaiQuota, fromRateLimitInfo } from './usage';
 
 /**
  * Workers: other models the window's AI can consult — "Claude leads, others help".
@@ -37,13 +39,24 @@ export interface Worker {
   note: string;
   /** Also enabled for agent tasks (agentTasks.ts): runs in a worktree with tools. */
   agent?: boolean;
+  /**
+   * 'login': Claude on the window's own Anthropic login — run as headless Claude
+   * Code on the account's directory (callLoginWorker), never with its token here.
+   */
+  kind?: 'login';
+  /** The provider's preset, for usage lookups (e.g. 'zai'). */
+  preset?: string;
 }
 
 export interface WorkerSource {
   workers(): Worker[];
   keyFor(providerId: string): Promise<string | undefined>;
+  /** The account's own Claude Code directory (its store — never a window's working dir, which may carry a gateway). */
+  loginDir(): string | undefined;
   readonly onDidChange: vscode.EventEmitter<void>;
 }
+
+export const LOGIN_PROVIDER = 'Anthropic login';
 
 const SERVER_NAME = 'claude-accounts-workers';
 /** Caps per call — a worker is for focused questions, not for shipping the repo. */
@@ -101,11 +114,86 @@ export async function callWorker(
   return { text, inputTokens: body.usage?.input_tokens, outputTokens: body.usage?.output_tokens, ms: Date.now() - started };
 }
 
+/**
+ * A worker on the Anthropic login: Claude Code itself, headless, on the
+ * account's own directory — no tools, no MCP servers, the worker's system
+ * prompt. The subscription is only ever used by Claude Code. Its stream also
+ * carries the subscription's rate-limit windows (rate_limit_event), returned
+ * for the usage book.
+ */
+export function callLoginWorker(
+  w: Worker,
+  accountDir: string,
+  task: string,
+  context: string | undefined
+): Promise<{ text: string; inputTokens?: number; outputTokens?: number; ms: number; rateLimit?: Record<string, unknown> }> {
+  const content = context ? `${task}\n\n<context>\n${context}\n</context>` : task;
+  const args = [
+    '-p', content, '--model', w.model, '--system-prompt', WORKER_SYSTEM, '--tools', '',
+    '--strict-mcp-config', '--no-session-persistence', '--output-format', 'stream-json', '--verbose',
+    // Belt and braces: the official endpoint and no provider key, whatever settings are around.
+    '--settings', JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://api.anthropic.com', ANTHROPIC_AUTH_TOKEN: '', ANTHROPIC_API_KEY: '' } }),
+  ];
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const k of Object.keys(env)) if (k.startsWith('ANTHROPIC_') || k === 'CLAUDE_CONFIG_DIR') delete env[k];
+  env.CLAUDE_CONFIG_DIR = accountDir;
+  const started = Date.now();
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.env.SHELL || '/bin/bash', ['-lc', 'exec claude "$@"', 'claude', ...args], {
+      cwd: accountDir,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let buf = '';
+    let err = '';
+    let text = '';
+    let usage: { input_tokens?: number; output_tokens?: number } | undefined;
+    let rateLimit: Record<string, unknown> | undefined;
+    let failed: string | undefined;
+    const timer = setTimeout(() => child.kill('SIGKILL'), CALL_TIMEOUT_MS);
+    const onLine = (line: string) => {
+      try {
+        const ev = JSON.parse(line) as { type?: string; result?: string; is_error?: boolean; usage?: typeof usage; rate_limit_info?: Record<string, unknown> };
+        if (ev.type === 'rate_limit_event' && ev.rate_limit_info) rateLimit = ev.rate_limit_info;
+        if (ev.type === 'result') {
+          text = ev.result ?? '';
+          usage = ev.usage;
+          if (ev.is_error) failed = ev.result || 'the run ended with an error';
+        }
+      } catch {
+        /* not JSON */
+      }
+    };
+    child.stdout!.on('data', (d: Buffer) => {
+      buf += d.toString();
+      let nl: number;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        onLine(buf.slice(0, nl));
+        buf = buf.slice(nl + 1);
+      }
+    });
+    child.stderr!.on('data', (d: Buffer) => (err += d.toString()));
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (buf) onLine(buf);
+      if (failed || (code !== 0 && !text)) {
+        reject(new Error(failed ?? (err.trim().split('\n').slice(-2).join(' ') || `claude exited with ${code}`)));
+      } else {
+        resolve({ text: text.trim(), inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens, ms: Date.now() - started, rateLimit });
+      }
+    });
+  });
+}
+
 export class DelegateServer implements vscode.Disposable {
   private server: http.Server | undefined;
   private port = 0;
+  /** The lead's token: every tool. */
   private readonly token = crypto.randomBytes(24).toString('hex');
+  /** Agent runs' token: consult and usage only — a worker can't start tasks. */
+  private readonly workerToken = crypto.randomBytes(24).toString('hex');
   private calls = 0;
+  readonly usage = new UsageBook();
   private readonly subscription: vscode.Disposable;
 
   /** `configDir`: this window's CLAUDE_CONFIG_DIR (its own working dir), or undefined when unbound. */
@@ -158,7 +246,8 @@ export class DelegateServer implements vscode.Disposable {
       res.writeHead(status, body ? { 'content-type': 'application/json' } : {});
       res.end(body ? JSON.stringify(body) : undefined);
     };
-    if (req.headers.authorization !== `Bearer ${this.token}`) return send(401, { error: 'unauthorized' });
+    const lead = req.headers.authorization === `Bearer ${this.token}`;
+    if (!lead && req.headers.authorization !== `Bearer ${this.workerToken}`) return send(401, { error: 'unauthorized' });
     if (req.method !== 'POST') return send(405);
     let raw = '';
     for await (const chunk of req) {
@@ -188,17 +277,25 @@ export class DelegateServer implements vscode.Disposable {
       case 'ping':
         return reply({});
       case 'tools/list':
-        return reply({ tools: this.tools() });
-      case 'tools/call':
-        return reply(await this.call(String(msg.params?.name), (msg.params?.arguments ?? {}) as Json));
+        return reply({ tools: this.tools(lead) });
+      case 'tools/call': {
+        const name = String(msg.params?.name);
+        if (!this.tools(lead).some((t) => t.name === name)) return reply({ content: [{ type: 'text', text: `Tool ${name} is not available here.` }], isError: true });
+        return reply(await this.call(name, (msg.params?.arguments ?? {}) as Json, lead ? 'lead' : 'agent'));
+      }
       default:
         return fail(-32601, `unknown method ${msg.method}`);
     }
   }
 
-  private tools(): Json[] {
+  /** Where agent runs reach this server, with the restricted token — while it is running. */
+  workerAccess(): { url: string; token: string } | undefined {
+    return this.server ? { url: `http://127.0.0.1:${this.port}/mcp`, token: this.workerToken } : undefined;
+  }
+
+  private tools(lead = true): Json[] {
     const ids = this.source.workers().map((w) => w.id);
-    return [
+    const all: Json[] = [
       {
         name: 'list_workers',
         description: 'List the worker models the user enabled, with what each is good for.',
@@ -228,8 +325,17 @@ export class DelegateServer implements vscode.Disposable {
           required: ['worker', 'task'],
         },
       },
-      ...this.agentTools(),
+      {
+        name: 'provider_usage',
+        description:
+          "How much of each worker provider's plan is used (e.g. the Anthropic subscription's 5-hour and weekly " +
+          "windows, Z.ai's credit windows) and this window's worker calls so far. Check it to spread work across " +
+          'subscriptions instead of exhausting one.',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      ...(lead ? this.agentTools() : []),
     ];
+    return all;
   }
 
   private agentTools(): Json[] {
@@ -241,6 +347,7 @@ export class DelegateServer implements vscode.Disposable {
         name: 'start_task',
         description:
           'Start an agent task: a worker model (another provider the user enabled) runs Claude Code headless on a ' +
+          "(it can consult other workers itself, answers only — e.g. Claude on the user's subscription) " +
           "scratch git worktree of this repo — HEAD plus the user's uncommitted changes — with auto-mode tool use " +
           '(edits, commands checked by a safety classifier). Returns a task_id at once; tasks take minutes. ' +
           'The worker sees only the repo and what you put in task/context. Get the result with wait_task.',
@@ -250,6 +357,12 @@ export class DelegateServer implements vscode.Disposable {
             worker: { type: 'string', enum: ids },
             task: { type: 'string', description: 'The job, stated completely, with how to verify it.' },
             context: { type: 'string', description: 'Anything it needs beyond the repo itself.' },
+            after: {
+              type: 'string',
+              description:
+                "Chain: start from this task's result instead of the user's repo (waits for it if it is still running). " +
+                'Applying a chained task also applies the unapplied tasks before it.',
+            },
           },
           required: ['worker', 'task'],
         },
@@ -277,12 +390,27 @@ export class DelegateServer implements vscode.Disposable {
     ];
   }
 
-  private async call(name: string, args: Json): Promise<Json> {
+  /** Refreshes what can be read without spending anything (Z.ai's monitor), then formats the book. */
+  async usageReport(): Promise<string> {
+    const ws = this.source.workers();
+    for (const w of ws) {
+      if (w.preset !== 'zai') continue;
+      const e = this.usage.get(w.providerName);
+      if (e && Date.now() - e.at < 60_000) continue;
+      const key = await this.source.keyFor(w.providerId);
+      const q = key ? await zaiQuota(key) : undefined;
+      if (q) this.usage.set(w.providerName, q);
+    }
+    return this.usage.format([...new Set(ws.map((w) => w.providerName))]);
+  }
+
+  private async call(name: string, args: Json, caller: 'lead' | 'agent' = 'lead'): Promise<Json> {
     const text = (t: string, isError = false) => ({ content: [{ type: 'text', text: t }], ...(isError && { isError: true }) });
     if (name === 'list_workers') {
       const ws = this.source.workers();
       return text(ws.map((w) => `- ${w.id}: ${w.note} (${w.providerName}, model ${w.model})`).join('\n') || 'No workers are enabled.');
     }
+    if (name === 'provider_usage') return text(await this.usageReport());
     if (this.agents && ['start_task', 'wait_task', 'cancel_task', 'apply_task_changes'].includes(name)) {
       try {
         const id = String(args.task_id ?? '');
@@ -293,8 +421,13 @@ export class DelegateServer implements vscode.Disposable {
           if (!task) return text('`task` is required.', true);
           const context = typeof args.context === 'string' ? args.context : undefined;
           if (task.length + (context?.length ?? 0) > MAX_CONTEXT_CHARS) return text(`Too much to send (limit ${MAX_CONTEXT_CHARS} characters).`, true);
-          const taskId = await this.agents.start(w.id, task, context);
-          return text(`Started task ${taskId} on ${w.id}. Call wait_task with task_id "${taskId}" for its result.`);
+          const after = typeof args.after === 'string' && args.after ? args.after : undefined;
+          const r = await this.agents.start(w.id, task, context, after);
+          return text(
+            `${r.queued ? 'Queued' : 'Started'} task ${r.id} on ${w.id}${after ? `, building on ${after}` : ''}` +
+              `${r.queued ? (after ? ` — it starts when ${after} is done` : ' — it starts when a slot frees') : ''}. ` +
+              `Call wait_task with task_id "${r.id}" for its result.`
+          );
         }
         if (name === 'wait_task') {
           const r = await this.agents.wait(id, Number(args.seconds) || 120);
@@ -318,13 +451,26 @@ export class DelegateServer implements vscode.Disposable {
     }
     if (this.calls >= MAX_CALLS) return text(`This window reached its limit of ${MAX_CALLS} worker calls; reload the window to reset it.`, true);
     const maxTokens = Math.min(Math.max(Number(args.max_tokens) || DEFAULT_OUTPUT_TOKENS, 64), MAX_OUTPUT_TOKENS);
-    const key = await this.source.keyFor(w.providerId);
-    if (!key) return text(`No key is stored for ${w.providerName}.`, true);
+    let run: () => Promise<{ text: string; inputTokens?: number; outputTokens?: number; ms: number; rateLimit?: Record<string, unknown> }>;
+    if (w.kind === 'login') {
+      const dir = this.source.loginDir();
+      if (!dir) return text("This window's account has no directory of its own to run Claude on.", true);
+      run = () => callLoginWorker(w, dir, task, context);
+    } else {
+      const key = await this.source.keyFor(w.providerId);
+      if (!key) return text(`No key is stored for ${w.providerName}.`, true);
+      run = () => callWorker(w, key, task, context, maxTokens);
+    }
     this.calls++;
     const busy = vscode.window.setStatusBarMessage(`$(sync~spin) Worker ${w.id}…`);
     try {
-      const r = await callWorker(w, key, task, context, maxTokens);
-      log(`workers: ${w.id} answered in ${r.ms} ms (${r.inputTokens ?? '?'} in / ${r.outputTokens ?? '?'} out tokens)`);
+      const r = await run();
+      if (r.rateLimit) {
+        const windows = fromRateLimitInfo(r.rateLimit);
+        if (windows.length) this.usage.set(w.providerName, { windows, source: "Claude Code's rate-limit report", at: Date.now() });
+      }
+      this.usage.count(w.id, 'call', r.inputTokens, r.outputTokens);
+      log(`workers: ${w.id} answered${caller === 'agent' ? ' an agent task' : ''} in ${r.ms} ms (${r.inputTokens ?? '?'} in / ${r.outputTokens ?? '?'} out tokens)`);
       return text(`${r.text || '(empty answer)'}\n\n— ${w.id} · ${r.ms} ms · ${r.inputTokens ?? '?'} in / ${r.outputTokens ?? '?'} out tokens`);
     } catch (err) {
       log(`workers: ${w.id} failed — ${(err as Error).message}`);

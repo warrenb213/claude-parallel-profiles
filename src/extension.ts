@@ -202,6 +202,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     cmd('claudeProfiles.addProvider', () => providers.addInteractive()),
     cmd('claudeProfiles.editProvider', () => providers.editInteractive()),
     cmd('claudeProfiles.showAgentTasks', () => agentTasks.showInteractive()),
+    cmd('claudeProfiles.showUsage', async () => {
+      const report = await workers.usageReport();
+      const doc = await vscode.workspace.openTextDocument({ content: `Provider usage\n\n${report}\n`, language: 'plaintext' });
+      await vscode.window.showTextDocument(doc, { preview: true });
+    }),
     // Only the focused window repairs a dir whose account was replaced by a
     // sign-in (it's the window the user signed in from). So a window that was
     // unfocused while that happened must reconcile when focus comes back —
@@ -262,8 +267,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Not part of the activation race: settings.json is read by each `claude` when
   // it starts, and it already carries the provider written at the last switch.
   // Workers (delegate.ts): registered in this window's own config while any are enabled.
-  const agentTasks = new AgentTasks((id) => providers.agentSpec(id));
-  const workers = new DelegateServer(providers, () => providers.ownConfigDir(), agentTasks);
+  // Login workers run on the account's own store dir — never on a window's working dir, which may carry a gateway.
+  providers.setLoginDir(() => {
+    const name = binding.getActiveName();
+    return name ? registry.get(name)?.dir : undefined;
+  });
+  const agentTasks: AgentTasks = new AgentTasks(
+    (id) => providers.agentSpec(id),
+    (): { url: string; token: string } | undefined => workers.workerAccess(),
+    (worker: string, inTok: number, outTok: number): void => workers.usage.count(worker, 'task', inTok, outTok)
+  );
+  const workers: DelegateServer = new DelegateServer(providers, () => providers.ownConfigDir(), agentTasks);
   context.subscriptions.push(workers, agentTasks);
   void providers.migrate().then(async () => {
     await providers.sync();

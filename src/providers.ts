@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { WindowBinding } from './binding';
+import { LOGIN_PROVIDER } from './delegate';
 import type { Worker, WorkerSource } from './delegate';
 import type { AgentRunSpec } from './agentTasks';
 import { HostState } from './hostState';
@@ -379,6 +380,13 @@ export async function testProvider(p: Provider, key: string): Promise<TestResult
   }
 }
 
+/** Claude Code model aliases a login worker may run (Claude Code resolves them to the current models). */
+const LOGIN_WORKER_NOTES: Record<string, string> = {
+  haiku: 'Claude Haiku — fast: summaries, quick checks',
+  sonnet: 'Claude Sonnet — reviews, second opinions, careful answers',
+  opus: 'Claude Opus — the hardest questions',
+};
+
 /** The models a provider can offer as workers, with a one-line note for the lead. */
 export function workerChoices(p: Provider): Array<{ model: string; note: string }> {
   if (isNative(p)) {
@@ -568,10 +576,48 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
     return file ? path.dirname(file) : undefined;
   }
 
+  private loginDirFn: () => string | undefined = () => undefined;
+
+  /** Wired at activation: the account store of the window's account (extension.ts). */
+  setLoginDir(fn: () => string | undefined): void {
+    this.loginDirFn = fn;
+  }
+
+  /** WorkerSource: the account's own directory, for workers on its Anthropic login. */
+  loginDir(): string | undefined {
+    return this.loginDirFn();
+  }
+
+  /** Claude models on this account's own login that are enabled as workers. */
+  private loginWorkers(): string[] {
+    const email = this.email();
+    return email ? (this.state.get<Record<string, string[]>>('claudeProfiles.loginWorkers', {})[email] ?? []) : [];
+  }
+
+  private async setLoginWorkers(models: string[]): Promise<void> {
+    const email = this.email();
+    if (!email) return;
+    const all = this.state.get<Record<string, string[]>>('claudeProfiles.loginWorkers', {});
+    if (models.length > 0) all[email] = models;
+    else delete all[email];
+    await this.state.update('claudeProfiles.loginWorkers', all);
+    this.onDidChange.fire();
+  }
+
   /** WorkerSource: every model of this account's providers enabled as a worker. */
   workers(): Worker[] {
     const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'provider';
-    return this.list().flatMap((p) => {
+    const login = this.loginWorkers().map((model) => ({
+      id: `anthropic-login/${model}`,
+      providerId: '__login__',
+      providerName: LOGIN_PROVIDER,
+      model,
+      baseUrl: ANTHROPIC_API,
+      auth: 'x-api-key' as const,
+      note: `${LOGIN_WORKER_NOTES[model] ?? model} — on this account's own subscription`,
+      kind: 'login' as const,
+    }));
+    return [...login, ...this.list().flatMap((p) => {
       const notes = new Map(workerChoices(p).map((c) => [c.model, c.note]));
       return (p.workers ?? []).map((model) => ({
         id: `${slug(p.name)}/${model}`,
@@ -582,8 +628,38 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
         auth: isNative(p) ? ('x-api-key' as const) : p.auth,
         note: notes.get(model) ?? `${model} on ${p.name}`,
         agent: (p.agentWorkers ?? []).includes(model),
+        ...(p.preset && { preset: p.preset }),
       }));
-    });
+    })];
+  }
+
+  /** Workers on this account's own Anthropic login: Claude Code, headless, on the subscription. */
+  private async editLoginWorkers(): Promise<void> {
+    const on = new Set(this.loginWorkers());
+    const picked = await vscode.window.showQuickPick(
+      Object.entries(LOGIN_WORKER_NOTES).map(([model, note]) => ({ label: model, description: note, picked: on.has(model) })),
+      {
+        title: "Workers on this account's own Anthropic login",
+        placeHolder: 'The lead and agent tasks may consult these. None selected = off.',
+        canPickMany: true,
+      }
+    );
+    if (!picked) return;
+    const models = picked.map((i) => i.label);
+    if (models.some((m) => !on.has(m))) {
+      const ok = await vscode.window.showWarningMessage(
+        `Let workers run on this account's Anthropic login (${models.join(', ')})?\n\n` +
+          `• Each call runs Claude Code itself, headless, on the account's subscription — no tools, no MCP ` +
+          `servers, just the task and the material it's given. It counts toward the plan's usage limits.\n` +
+          `• Agent tasks on other providers (e.g. GLM) may consult it too.\n` +
+          `• Its 5-hour and weekly usage show up in provider_usage after each call.`,
+        { modal: true },
+        'Allow'
+      );
+      if (ok !== 'Allow') return;
+    }
+    await this.setLoginWorkers(models);
+    vscode.window.showInformationMessage(models.length ? `Login workers: ${models.join(', ')}. New Claude Code sessions get them.` : 'Login workers are off.');
   }
 
   /**
@@ -1124,21 +1200,27 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
 
   async editInteractive(): Promise<void> {
     const providers = this.list();
-    if (providers.length === 0) {
-      const pick = await vscode.window.showInformationMessage('No providers yet.', 'Add a provider');
-      if (pick) await this.addInteractive();
-      return;
-    }
-    const target = (
-      await vscode.window.showQuickPick(
-        providers.map((p) => ({
+    const LOGIN = '__login__';
+    const chosen = await vscode.window.showQuickPick(
+      [
+        {
+          label: '$(account) Anthropic login (this account)',
+          description: this.loginWorkers().length ? `workers: ${this.loginWorkers().join(', ')}` : 'workers: off',
+          provider: undefined as Provider | undefined,
+          id: LOGIN,
+        },
+        ...providers.map((p) => ({
           label: p.name,
           description: isNative(p) ? 'Anthropic API key' : p.preset ? PRESETS[p.preset].label : p.baseUrl,
-          provider: p,
+          provider: p as Provider | undefined,
+          id: p.id,
         })),
-        { title: 'Edit or remove a provider' }
-      )
-    )?.provider;
+      ],
+      { title: 'Edit or remove a provider' }
+    );
+    if (!chosen) return;
+    if (chosen.id === LOGIN) return this.editLoginWorkers();
+    const target = chosen.provider;
     if (!target) return;
 
     type Action = 'test' | 'workers' | 'key' | 'url' | 'auth' | 'models' | 'others' | 'refresh' | 'proxylog' | 'betas' | 'rename' | 'remove';

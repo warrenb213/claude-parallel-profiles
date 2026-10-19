@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.12.0 — 2026-10-19
+
+### Added
+
+- **Chained agent tasks.** `start_task(..., after: <task_id>)` starts from another task's result (waiting for it if it's still running), so pipelines can be queued at once. Applying a chained task also applies the earlier, unapplied tasks of its chain.
+- **Workers can consult.** Agent runs get `delegate`, `list_workers` and `provider_usage` (answers only) through a token limited to those tools — they can't start tasks.
+- **Claude on the account's own login as a worker.** *Edit or Remove a Provider → Anthropic login (this account)* enables haiku / sonnet / opus on the subscription as workers, for the lead and for agents (e.g. GLM asking Claude for a second opinion). Each call is Claude Code itself, headless, on the account's own directory, with no tools, no MCP servers and no saved session; the extension never handles the subscription's token.
+- **Usage awareness.** `provider_usage` and *Claude Accounts: Show Provider Usage*: the Anthropic login's 5-hour and weekly windows (from Claude Code's rate-limit reports), Z.ai's credit windows (from its unofficial quota monitor), and this window's calls, tasks and tokens per worker.
+- Verified on real providers: a GLM-5.3 task chained after another built on its result, consulted Claude Haiku on the user's Team subscription mid-task (4 s) and quoted it; the chain applied as one; both plans' usage reported.
+
 ## 1.11.0 — 2026-10-19
 
 ### Added

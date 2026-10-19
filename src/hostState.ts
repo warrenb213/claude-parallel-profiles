@@ -37,6 +37,8 @@ const KEYS = [
   'claudeProfiles.providersMigrated',
   /** A random id for this host, naming its provider keys in the client's secret storage. */
   'claudeProfiles.hostId',
+  /** Claude models on each account's own Anthropic login enabled as workers, by email. */
+  'claudeProfiles.loginWorkers',
 ] as const;
 export type HostStateKey = (typeof KEYS)[number];
 
