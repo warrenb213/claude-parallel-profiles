@@ -75,13 +75,29 @@ interface Task {
   links?: string[];
   /** What the snapshot left out (untracked over budget, LFS files), for the worker and the lead. */
   snapshotNote?: string;
+  minutes: number;
+  maxTurns: number;
+  /** The worker's latest message — what a follow-up to a stopped run is told it was doing. */
+  lastText?: string;
+  lastOutput?: number;
+  cancelling?: boolean;
   applied?: boolean;
   waiters: Array<() => void>;
 }
 
 const MAX_RUNNING = 2;
-const MAX_TURNS = 80;
-const WALL_MS = 30 * 60_000;
+/**
+ * Each run's limits. Real work (a C++ build, then fixing what it reports) runs
+ * well past half an hour — two GLM runs were cut off at a 30-minute limit
+ * mid-build with ~900 and ~1,900 lines written. The lead can set its own per
+ * task within the bounds; a run silent for IDLE_MS is taken as stuck (a Bash
+ * call is capped at 10 minutes by Claude Code).
+ */
+export const TASK_LIMITS = {
+  minutes: { default: 120, min: 5, max: 480 },
+  turns: { default: 300, min: 10, max: 1000 },
+};
+const IDLE_MS = 20 * 60_000;
 const KEEP_DAYS = 7;
 const MAX_DIFF_IN_RESULT = 60_000;
 
@@ -206,6 +222,16 @@ const IDENTITY = {
   GIT_COMMITTER_EMAIL: 'agent-task@localhost',
 };
 
+/** For a task built on one that didn't finish: where that run stopped. */
+function continuation(pred: Task | undefined): string {
+  if (!pred || pred.status === 'done') return '';
+  return (
+    ` This continues task ${pred.id}, which ended before it finished (${pred.error ?? pred.status}); its changes are already ` +
+    'in this copy.' +
+    (pred.lastText ? ` Its last message:\n<previous_run>\n${pred.lastText.slice(0, 4000)}\n</previous_run>` : '')
+  );
+}
+
 /** A tool call's one-line heading in a transcript: what it acts on. */
 function toolHead(input: Record<string, unknown>): string {
   const target = input.file_path ?? input.notebook_path ?? input.path ?? input.pattern ?? input.url ?? input.description;
@@ -295,7 +321,9 @@ export class AgentTasks implements vscode.Disposable {
         case 'done':
           return `$(check) **${name}** · done in ${time} · ${t.files?.length ?? 0} file${t.files?.length === 1 ? '' : 's'} changed${t.applied ? ' · **applied**' : t.files?.length ? ' · not applied' : ''} — ${what}`;
         default:
-          return `$(error) **${name}** · ${t.status}${t.error ? `: ${md(t.error.slice(0, 80))}` : ''} — ${what}`;
+          return t.result && t.files?.length
+            ? `$(debug-pause) **${name}** · ${md(t.error ?? t.status)} · ${t.files.length} file${t.files.length === 1 ? '' : 's'} changed${t.applied ? ' · **applied**' : ' · not applied'} — ${what}`
+            : `$(error) **${name}** · ${t.status}${t.error ? `: ${md(t.error.slice(0, 80))}` : ''} — ${what}`;
       }
     });
     if (all.length > max) lines.push(`_…and ${all.length - max} earlier_`);
@@ -319,6 +347,7 @@ export class AgentTasks implements vscode.Disposable {
       [
         `**Status:** ${t.status}${t.applied ? ' (applied)' : ''}`,
         `**Started:** ${new Date(t.started).toLocaleString()} · ${secs < 120 ? `${secs} s` : `${Math.round(secs / 60)} min`}`,
+        `**Limits:** ${t.minutes} min, ${t.maxTurns} turns`,
         `**Turns:** ${t.turns} · **tool uses:** ${t.toolUses}${t.inTok !== undefined ? ` · **tokens:** ${t.inTok.toLocaleString('en-US')} in / ${(t.outTok ?? 0).toLocaleString('en-US')} out` : ''}`,
         t.after ? `**Built on:** ${t.after}` : '',
         t.error ? `**Error:** ${t.error}` : '',
@@ -564,17 +593,18 @@ export class AgentTasks implements vscode.Disposable {
   async start(
     worker: string,
     task: string,
-    context?: string,
-    after?: string,
-    include: string[] = []
+    opts: { context?: string; after?: string; include?: string[]; minutes?: number; maxTurns?: number } = {}
   ): Promise<{ id: string; queued: boolean; note?: string }> {
+    const { context, after, include = [] } = opts;
+    const bound = (v: number | undefined, l: { default: number; min: number; max: number }) =>
+      Math.round(Math.min(Math.max(Number.isFinite(v) ? v! : l.default, l.min), l.max));
     if (!(await this.spec(worker))) throw new Error(`"${worker}" is not enabled for agent tasks.`);
     if (after && include.length) throw new Error('`include` is for tasks that start from the repo; a chained task has what the task before it had.');
     let pred: Task | undefined;
     if (after) {
       pred = this.tasks.get(after);
       if (!pred) throw new Error(`No task ${after} in this window.`);
-      if (pred.status === 'failed' || pred.status === 'cancelled') throw new Error(`Task ${after} ${pred.status} — nothing to build on.`);
+      if ((pred.status === 'failed' || pred.status === 'cancelled') && !pred.result) throw new Error(`Task ${after} ${pred.status} before it changed anything — nothing to build on.`);
     }
     const id = `t${Date.now().toString(36)}${crypto.randomBytes(2).toString('hex')}`;
     const dir = path.join(this.root(), id);
@@ -583,6 +613,7 @@ export class AgentTasks implements vscode.Disposable {
     const t: Task = {
       id, worker, task, context, after, status: 'queued', dir, repo, base: '', worktree: path.join(dir, 'worktree'),
       started: Date.now(), turns: 0, toolUses: 0, written: new Set(), waiters: [],
+      minutes: bound(opts.minutes, TASK_LIMITS.minutes), maxTurns: bound(opts.maxTurns, TASK_LIMITS.turns),
     };
     const notes: string[] = [];
     const refused: string[] = [];
@@ -618,14 +649,15 @@ export class AgentTasks implements vscode.Disposable {
   private async promote(): Promise<void> {
     for (const t of [...this.tasks.values()].filter((x) => x.status === 'queued').sort((a, b) => a.started - b.started)) {
       const pred = t.after ? this.tasks.get(t.after) : undefined;
-      if (pred && (pred.status === 'failed' || pred.status === 'cancelled')) {
+      // A predecessor stopped at a limit still has its changes (result): build on them.
+      if (pred && (pred.status === 'failed' || pred.status === 'cancelled') && !pred.result) {
         t.status = 'failed';
         t.error = `its predecessor ${pred.id} ${pred.status}`;
         t.ended = Date.now();
         for (const w of t.waiters.splice(0)) w();
         continue;
       }
-      if (pred && pred.status !== 'done') continue;
+      if (pred && (pred.status === 'running' || pred.status === 'queued')) continue;
       if ([...this.tasks.values()].filter((x) => x.status === 'running').length >= MAX_RUNNING) return;
       if (pred) t.base = pred.result ?? pred.base;
       try {
@@ -687,11 +719,14 @@ export class AgentTasks implements vscode.Disposable {
       `${RUN_INSTRUCTIONS}${access ? CONSULT_INSTRUCTIONS : ''}` +
       ' Git LFS files in this copy are pointer files, not their content.' +
       (t.snapshotNote ? ` ${t.snapshotNote}` : '') +
+      ` You have ${t.minutes} minutes and ${t.maxTurns} turns. Your changes so far are kept if you run out, ` +
+      'but your report is not: if you might, stop in time and report what is done and what is left.' +
+      continuation(t.after ? this.tasks.get(t.after) : undefined) +
       `\n\n<task>\n${local(t.task)}\n</task>` +
       (t.context ? `\n\n<context>\n${local(t.context)}\n</context>` : '');
     const args = [
       '-p', prompt, '--model', spec.runModel, '--permission-mode', 'auto',
-      '--output-format', 'stream-json', '--verbose', '--no-session-persistence', '--max-turns', String(MAX_TURNS),
+      '--output-format', 'stream-json', '--verbose', '--no-session-persistence', '--max-turns', String(t.maxTurns),
       // Consulting is answers-only and already consented to: no classifier check per call.
       ...(access ? ['--allowedTools', ...CONSULT_TOOLS.map((n) => `mcp__${CONSULT_SERVER}__${n}`)] : []),
     ];
@@ -708,7 +743,9 @@ export class AgentTasks implements vscode.Disposable {
     t.child = child;
     const out = fs.openSync(path.join(t.dir, 'log.jsonl'), 'a', 0o600);
     let buf = '';
+    t.lastOutput = Date.now();
     child.stdout!.on('data', (d: Buffer) => {
+      t.lastOutput = Date.now();
       fs.writeSync(out, d);
       buf += d.toString();
       let nl: number;
@@ -719,11 +756,17 @@ export class AgentTasks implements vscode.Disposable {
     });
     child.stderr!.on('data', (d: Buffer) => fs.writeSync(out, d));
     const wall = setTimeout(() => {
-      t.error = `timed out after ${WALL_MS / 60_000} min`;
+      t.error = `stopped at its ${t.minutes}-minute limit`;
       this.kill(t);
-    }, WALL_MS);
+    }, t.minutes * 60_000);
+    const idle = setInterval(() => {
+      if (Date.now() - (t.lastOutput ?? 0) < IDLE_MS) return;
+      t.error = `stopped: no output for ${IDLE_MS / 60_000} minutes`;
+      this.kill(t);
+    }, 60_000);
     child.on('close', (code) => {
       clearTimeout(wall);
+      clearInterval(idle);
       fs.closeSync(out);
       void this.finish(t, code);
     });
@@ -752,6 +795,7 @@ export class AgentTasks implements vscode.Disposable {
     if (ev.type === 'assistant') {
       t.turns++;
       for (const c of ev.message?.content ?? []) {
+        if (c.type === 'text' && c.text?.trim()) t.lastText = c.text.trim();
         if (c.type === 'tool_use') {
           t.toolUses++;
           const arg = c.input?.command ?? c.input?.file_path ?? c.input?.pattern ?? '';
@@ -769,6 +813,7 @@ export class AgentTasks implements vscode.Disposable {
       t.costUsd = ev.total_cost_usd;
       t.inTok = ev.usage?.input_tokens;
       t.outTok = ev.usage?.output_tokens;
+      if (ev.subtype === 'error_max_turns' && !t.error) t.error = `stopped at its ${t.maxTurns}-turn limit`;
       if (ev.is_error && !t.error) t.error = 'the run ended with an error';
     }
   }
@@ -824,7 +869,7 @@ export class AgentTasks implements vscode.Disposable {
     }
     fs.rmSync(path.join(t.dir, 'config'), { recursive: true, force: true }); // the run's settings
     fs.rmSync(path.join(t.dir, 'index'), { force: true });
-    if (t.status === 'running') t.status = t.error || (code !== 0 && !t.report) ? 'failed' : 'done';
+    if (t.status === 'running') t.status = t.cancelling ? 'cancelled' : t.error || (code !== 0 && !t.report) ? 'failed' : 'done';
     t.ended = Date.now();
     t.child = undefined;
     log(`agent task ${t.id}: ${t.status} in ${Math.round((t.ended - t.started) / 1000)} s, ${t.turns} turns, ${t.files?.length ?? 0} files changed`);
@@ -852,7 +897,9 @@ export class AgentTasks implements vscode.Disposable {
       return `Cancelled ${id} before it started.`;
     }
     if (t.status !== 'running') return `Task ${id} already ${t.status}.`;
-    t.status = 'cancelled';
+    // Stays "running" until finish() has collected the changes, so wait_task waits for them.
+    t.cancelling = true;
+    t.error ??= 'stopped by the lead';
     this.kill(t);
     return `Cancelling ${id}; its changes so far are still collected.`;
   }
@@ -883,6 +930,7 @@ export class AgentTasks implements vscode.Disposable {
       const full = fs.readFileSync(t.patchFile, 'utf-8');
       diff = full.length > MAX_DIFF_IN_RESULT ? `${full.slice(0, MAX_DIFF_IN_RESULT)}\n… (truncated — full patch: ${t.patchFile})` : full;
     }
+    const stopped = t.status !== 'done' && Boolean(t.result);
     return {
       text: [
         `Task ${id}: ${t.status}${t.error ? ` (${t.error})` : ''} — ${t.worker}, ${secs} s, ${t.turns} turns${t.costUsd !== undefined ? `, ~$${t.costUsd.toFixed(3)} by Claude Code's estimate` : ''}.` +
@@ -895,9 +943,14 @@ export class AgentTasks implements vscode.Disposable {
         t.sideEffects?.length
           ? `\nCreated by commands, NOT included (build output, caches…): ${t.sideEffects.slice(0, 20).join(', ')}${t.sideEffects.length > 20 ? ` and ${t.sideEffects.length - 20} more` : ''}.`
           : '',
+        stopped && !t.report && t.lastText ? `\nIts last message before it was stopped:\n${t.lastText.slice(0, 3000)}` : '',
         t.patchFile ? `\nReview the diff; if it should land, call apply_task_changes with task_id "${id}".` : '',
+        stopped
+          ? `\nIt didn't finish, but its changes so far are kept: apply them, or continue with start_task and after: "${id}" ` +
+            '(the follow-up starts from them and is told where this run stopped).'
+          : '',
       ].join('\n'),
-      isError: t.status === 'failed',
+      isError: t.status === 'failed' && !t.result,
     };
   }
 
@@ -923,13 +976,15 @@ export class AgentTasks implements vscode.Disposable {
   async apply(id: string): Promise<{ text: string; isError?: boolean }> {
     const t = this.tasks.get(id);
     if (!t) return { text: `No task ${id} in this window.`, isError: true };
-    if (t.status !== 'done') return { text: `Task ${id} is ${t.status}; only a finished task can be applied.`, isError: true };
+    if (t.status === 'running' || t.status === 'queued') return { text: `Task ${id} is ${t.status}; wait for it to end first.`, isError: true };
+    if (!t.result) return { text: `Task ${id} ${t.status} before it changed anything.`, isError: true };
     if (t.applied) return { text: `Task ${id} was already applied.`, isError: true };
     const chain = this.chain(t);
     const lastApplied = chain.map((x) => Boolean(x.applied)).lastIndexOf(true);
     const pending = chain.slice(lastApplied + 1);
-    const notDone = pending.find((x) => x.status !== 'done' || !x.result);
-    if (notDone) return { text: `Task ${notDone.id} in this chain is ${notDone.status}; it can't be applied.`, isError: true };
+    // A run stopped at a limit counts: its changes were collected (result) and the lead reviewed them.
+    const notDone = pending.find((x) => !x.result);
+    if (notDone) return { text: `Task ${notDone.id} in this chain is ${notDone.status} with no changes collected; it can't be applied.`, isError: true };
     const from = lastApplied >= 0 ? chain[lastApplied].result! : chain[0].base;
     const patch = await git(t.repo, ['diff', '--binary', from, t.result!]);
     if (!patch.trim()) {

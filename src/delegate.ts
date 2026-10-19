@@ -6,7 +6,7 @@ import * as crypto from 'crypto';
 import { spawn } from 'child_process';
 import { claudeShellArgs } from './cli';
 import { log } from './log';
-import type { AgentTasks } from './agentTasks';
+import { TASK_LIMITS, type AgentTasks } from './agentTasks';
 import { UsageBook, zaiQuota, fromRateLimitInfo } from './usage';
 
 /**
@@ -452,10 +452,23 @@ export class DelegateServer implements vscode.Disposable {
                 'Files or folders (relative to the repo root) to copy into the worker\'s copy even though they are ' +
                 'gitignored — only what the task needs (5 MB a file, 100 MB and 2,000 files in all). Not with `after`.',
             },
+            minutes: {
+              type: 'integer',
+              minimum: TASK_LIMITS.minutes.min,
+              maximum: TASK_LIMITS.minutes.max,
+              description: `Time limit (default ${TASK_LIMITS.minutes.default}). Builds and test loops take long; changes so far are kept if it runs out.`,
+            },
+            max_turns: {
+              type: 'integer',
+              minimum: TASK_LIMITS.turns.min,
+              maximum: TASK_LIMITS.turns.max,
+              description: `Turn limit (default ${TASK_LIMITS.turns.default}).`,
+            },
             after: {
               type: 'string',
               description:
                 "Chain: start from this task's result instead of the user's repo (waits for it if it is still running). " +
+                'Also continues a task stopped at its limit: the follow-up starts from its changes and is told where it stopped. ' +
                 'Applying a chained task also applies the unapplied tasks before it.',
             },
           },
@@ -521,7 +534,13 @@ export class DelegateServer implements vscode.Disposable {
           if (task.length + (context?.length ?? 0) > MAX_CONTEXT_CHARS) return text(`Too much to send (limit ${MAX_CONTEXT_CHARS} characters).`, true);
           const after = typeof args.after === 'string' && args.after ? args.after : undefined;
           const include = Array.isArray(args.include) ? args.include.filter((x): x is string => typeof x === 'string' && x.trim() !== '').map((x) => x.trim()) : [];
-          const r = await this.agents.start(w.id, task, context, after, include);
+          const r = await this.agents.start(w.id, task, {
+            context,
+            after,
+            include,
+            minutes: typeof args.minutes === 'number' ? args.minutes : undefined,
+            maxTurns: typeof args.max_turns === 'number' ? args.max_turns : undefined,
+          });
           return text(
             `${r.queued ? 'Queued' : 'Started'} task ${r.id} on ${w.id}${after ? `, building on ${after}` : ''}` +
               `${r.queued ? (after ? ` — it starts when ${after} is done` : ' — it starts when a slot frees') : ''}. ` +

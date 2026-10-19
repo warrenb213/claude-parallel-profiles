@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.14.1 — 2026-10-19
+
+### Fixed
+
+- **Agent tasks were cut off after 30 minutes, and their work was trapped.** Two GLM runs building a C++ project were stopped mid-build at exactly 30 minutes with ~900 and ~1,900 lines written; as "failed" tasks, neither could be applied or built on. Now:
+  - each run gets 2 hours and 300 turns by default; the lead can set `minutes` (5–480) and `max_turns` (10–1000) per task, and a run with no output for 20 minutes is stopped as stuck;
+  - the worker is told its limits, so it can stop in time to report;
+  - a run stopped at a limit or cancelled keeps its collected changes: `apply_task_changes` takes them, and `start_task` with `after` continues from them — the follow-up is told the run was stopped and gets its last message. `wait_task` says so, with that last message;
+  - cancelling no longer reports the task ended before its changes were collected.
+  - In the hover, a stopped task with changes shows them (files changed, applied or not) instead of a bare error.
+
 ## 1.14.0 — 2026-10-19
 
 ### Added
