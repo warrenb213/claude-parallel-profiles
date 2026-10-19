@@ -5,6 +5,7 @@ import { WindowBinding } from './binding';
 import { getAuthStatus, AuthStatus } from './cli';
 import { defaultSourceDir } from './capture';
 import { ProviderManager, describeLogin, describeModels } from './providers';
+import type { AgentTasks } from './agentTasks';
 
 /** Marketplace id — the hover links to the extension's own page with it. */
 const EXTENSION_ID = 'DercasDrol.claude-parallel-accounts';
@@ -170,6 +171,14 @@ export class StatusBarManager implements vscode.Disposable {
     return md;
   }
 
+  private agentTasks: AgentTasks | undefined;
+
+  /** Agent tasks join the account's card: their state in the hover, a count in the text while active. */
+  setAgentTasks(tasks: AgentTasks): void {
+    this.agentTasks = tasks;
+    this.disposables.push(tasks.onDidChange.event(() => this.render()));
+  }
+
   private render(): void {
     const dir = this.effectiveDir();
     const active = this.binding.getActiveName();
@@ -194,9 +203,11 @@ export class StatusBarManager implements vscode.Disposable {
       // keeps showing the Anthropic login while a gateway is billing, so this is
       // the one place that says where requests actually go.
       const provider = this.providers.active();
+      const tasks = this.agentTasks?.summary();
       this.item.text = `$(account) ${email}${isSaved ? '' : ' $(circle-outline)'}${
         provider ? ` · ${provider.name}` : ''
-      }`;
+      }${tasks?.active ? ` · $(sync~spin) ${tasks.active}` : ''}`;
+      const workers = this.providers.workers();
       // The tooltip doubles as the action menu: VSCode cannot anchor a real
       // menu to a status bar item, but a trusted-markdown hover CAN hold
       // command links — so the actions appear right above the button.
@@ -210,6 +221,10 @@ export class StatusBarManager implements vscode.Disposable {
         !isSaved ? '[$(save) Save this account](command:claudeProfiles.captureAccount "Save it so you can switch back to it later")' : '',
         hasOthers ? '[$(arrow-swap) Switch account](command:claudeProfiles.switchAccount "Pick another account for this window")' : '',
         '[$(credit-card) Switch provider](command:claudeProfiles.switchProvider "Bill this window to its Anthropic login, an Anthropic API key, or a gateway such as Poe")',
+        tasks?.lines.length
+          ? '[$(checklist) Agent tasks](command:claudeProfiles.showAgentTasks "Open a task\'s log or patch, or cancel it")'
+          : '',
+        workers.length ? '[$(graph) Usage](command:claudeProfiles.showUsage "How much of each worker provider\'s plan is used")' : '',
         unique.length > 0
           ? '[$(trash) Forget…](command:claudeProfiles.removeProfile "Sign the account out and remove it from the list")'
           : '',
@@ -228,6 +243,12 @@ export class StatusBarManager implements vscode.Disposable {
                 ? ` · plus ${provider.extraModels.length} non-Claude through the local proxy`
                 : '')
             : `$(credit-card) Billing to **Anthropic** — ${describeLogin(dir)}.`,
+        workers.length
+          ? `$(organization) Workers: ${workers
+              .map((w) => (w.agent ? `${w.id} _(+agent tasks)_` : w.id))
+              .join(', ')}`
+          : '',
+        tasks?.lines.length ? `**Agent tasks**${tasks.active ? ` — ${tasks.active} active` : ''}\n\n${tasks.lines.map((l) => `- ${l}`).join('\n')}` : '',
         `Accounts saved: **${unique.length}**${
           this.binding.rememberedForFolder() ? ' · _auto-selected: this folder used it last time_' : ''
         }`,

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.13.2 — 2026-10-19
+
+### Changed
+
+- **Agent tasks and workers live on the account's status bar item.** Its hover card now lists the window's workers and recent agent tasks (worker, turns and current action while running, files changed and whether applied when done, or why it failed), with *Agent tasks* and *Usage* links beside *Switch account* and *Switch provider*. While tasks are active the item's text shows a count (`· ⟳ 2`). The separate agent-task status bar item is gone.
+
 ## 1.13.1 — 2026-10-19
 
 ### Fixed

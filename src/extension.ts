@@ -278,6 +278,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     (worker: string, inTok: number, outTok: number): void => workers.usage.count(worker, 'task', inTok, outTok)
   );
   const workers: DelegateServer = new DelegateServer(providers, () => providers.ownConfigDir(), agentTasks);
+  statusBar.setAgentTasks(agentTasks);
   context.subscriptions.push(workers, agentTasks);
   void providers.migrate().then(async () => {
     await providers.sync();

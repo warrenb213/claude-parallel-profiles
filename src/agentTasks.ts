@@ -176,7 +176,8 @@ const RUN_INSTRUCTIONS =
 
 export class AgentTasks implements vscode.Disposable {
   private readonly tasks = new Map<string, Task>();
-  private readonly item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
+  /** Fires when any task changes — the account's status bar item shows them (statusBar.ts). */
+  readonly onDidChange = new vscode.EventEmitter<void>();
 
   constructor(
     private readonly spec: (workerId: string) => Promise<AgentRunSpec | undefined>,
@@ -185,7 +186,6 @@ export class AgentTasks implements vscode.Disposable {
     /** Called when a task ends: worker, input and output tokens (for the usage book). */
     private readonly onTaskDone?: (worker: string, inTok: number, outTok: number) => void
   ) {
-    this.item.command = 'claudeProfiles.showAgentTasks';
     this.prune();
   }
 
@@ -206,14 +206,35 @@ export class AgentTasks implements vscode.Disposable {
   }
 
   private render(): void {
-    const running = [...this.tasks.values()].filter((t) => t.status === 'running');
-    if (running.length === 0) {
-      this.item.hide();
-      return;
-    }
-    this.item.text = `$(sync~spin) ${running.length} agent task${running.length > 1 ? 's' : ''}`;
-    this.item.tooltip = running.map((t) => `${t.id} · ${t.worker} · ${t.turns} turns · ${t.lastAction ?? 'starting'}`).join('\n');
-    this.item.show();
+    this.onDidChange.fire();
+  }
+
+  /**
+   * For the account's hover card: how many tasks are active, and a line per
+   * recent task (newest first) — worker, state, progress, and what it changed.
+   */
+  summary(max = 5): { active: number; lines: string[] } {
+    const md = (s: string) => s.replace(/[\\`*_[\]<>|]/g, (c) => `\\${c}`);
+    const all = [...this.tasks.values()].sort((a, b) => b.started - a.started);
+    const active = all.filter((t) => t.status === 'running' || t.status === 'queued').length;
+    const lines = all.slice(0, max).map((t) => {
+      const name = t.worker.split('/').pop();
+      const what = md(t.task.length > 70 ? `${t.task.slice(0, 70)}…` : t.task);
+      const secs = Math.round(((t.ended ?? Date.now()) - t.started) / 1000);
+      const time = secs < 120 ? `${secs} s` : `${Math.round(secs / 60)} min`;
+      switch (t.status) {
+        case 'queued':
+          return `$(clock) **${name}** · queued${t.after ? ` after ${t.after}` : ''} — ${what}`;
+        case 'running':
+          return `$(sync~spin) **${name}** · ${t.turns} turns · ${time}${t.lastAction ? ` · \`${t.lastAction.slice(0, 60).replace(/`/g, "'")}\`` : ''} — ${what}`;
+        case 'done':
+          return `$(check) **${name}** · done in ${time} · ${t.files?.length ?? 0} file${t.files?.length === 1 ? '' : 's'} changed${t.applied ? ' · **applied**' : t.files?.length ? ' · not applied' : ''} — ${what}`;
+        default:
+          return `$(error) **${name}** · ${t.status}${t.error ? `: ${md(t.error.slice(0, 80))}` : ''} — ${what}`;
+      }
+    });
+    if (all.length > max) lines.push(`_…and ${all.length - max} earlier_`);
+    return { active, lines };
   }
 
   /** The repository a task works on: the window's first folder's git top level. */
@@ -760,6 +781,6 @@ export class AgentTasks implements vscode.Disposable {
         /* best effort */
       }
     }
-    this.item.dispose();
+    this.onDidChange.dispose();
   }
 }
