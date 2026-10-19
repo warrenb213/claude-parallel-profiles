@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.13.1 — 2026-10-19
+
+### Fixed
+
+- **Agent tasks could copy an entire project's scratch data.** The task snapshot ("HEAD + uncommitted changes, untracked files included") ran `git add -A`. In a project with 162 GB of untracked scratch data in a folder that wasn't gitignored (`.temp`), three tasks started at once each began hashing all of it into the repository's object store — 8.3 GB written before they were stopped. Now:
+  - untracked files are taken within a budget — 5 MB a file, 100 MB and 2,000 files in all — by top-level folder, smallest first; a folder that doesn't fit is left out whole;
+  - Git LFS files are never added (modified ones keep their committed version) and worktrees keep them as pointers (`GIT_LFS_SKIP_SMUDGE`), so their content is never copied;
+  - a repository whose tracked files exceed 5 GB is refused; snapshots run one at a time per repository, each git step capped at 2 minutes;
+  - what was left out is told to the worker and to the lead, with a hint to gitignore scratch data.
+  On the affected repository the snapshot now takes 16 s and writes a few KB.
+
 ## 1.13.0 — 2026-10-19
 
 ### Added

@@ -71,6 +71,8 @@ interface Task {
   sideEffects?: string[];
   /** Dependency folders linked into the worktree (DEP_DIRS). */
   links?: string[];
+  /** What the snapshot left out (untracked over budget, LFS files), for the worker and the lead. */
+  snapshotNote?: string;
   applied?: boolean;
   waiters: Array<() => void>;
 }
@@ -80,6 +82,23 @@ const MAX_TURNS = 80;
 const WALL_MS = 30 * 60_000;
 const KEEP_DAYS = 7;
 const MAX_DIFF_IN_RESULT = 60_000;
+
+/**
+ * Snapshot budgets. A repo's untracked content can be anything — one project
+ * had 162 GB of scratch data in an un-ignored `.temp`, and `git add -A` began
+ * hashing all of it into the repo's object store, once per task. So untracked
+ * files are taken one by one within these limits; the rest is left out and
+ * reported, and LFS-managed files are never added (their content would be
+ * copied into LFS storage).
+ */
+const UNTRACKED_FILE_MAX = 5 * 1024 * 1024;
+const UNTRACKED_TOTAL_MAX = 100 * 1024 * 1024;
+const UNTRACKED_COUNT_MAX = 2_000;
+/** How many untracked paths to look at before giving up counting. */
+const UNTRACKED_SCAN_MAX = 200_000;
+/** A worktree checks HEAD out in full: refuse repos whose tracked files exceed this. */
+const CHECKOUT_MAX_BYTES = 5 * 1024 ** 3;
+const SNAPSHOT_GIT_TIMEOUT_MS = 120_000;
 
 /**
  * Dependency folders a worktree lacks — they're gitignored, so a snapshot
@@ -97,12 +116,45 @@ const CONSULT_INSTRUCTIONS =
   "e.g. Claude on the user's subscription for a second opinion on a tricky change. `list_workers` shows who " +
   'is available, `provider_usage` how much of each plan is left; consult when it helps, not for every step.';
 
-function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Promise<string> {
+function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv, opts: { timeoutMs?: number; input?: string } = {}): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile('git', args, { cwd, env: { ...process.env, ...env }, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) reject(new Error(`git ${args[0]}: ${(stderr || err.message).toString().trim().split('\n').slice(-2).join(' ')}`));
-      else resolve(stdout.toString());
+    const child = execFile(
+      'git',
+      args,
+      { cwd, env: { ...process.env, ...env }, maxBuffer: 256 * 1024 * 1024, timeout: opts.timeoutMs ?? 0, killSignal: 'SIGKILL' },
+      (err, stdout, stderr) => {
+        if (err) {
+          const killed = (err as { killed?: boolean }).killed;
+          reject(new Error(killed ? `git ${args[0]} took longer than ${Math.round((opts.timeoutMs ?? 0) / 1000)} s and was stopped` : `git ${args[0]}: ${(stderr || err.message).toString().trim().split('\n').slice(-2).join(' ')}`));
+        } else resolve(stdout.toString());
+      }
+    );
+    if (opts.input !== undefined) child.stdin?.end(opts.input);
+  });
+}
+
+/** Lists NUL-separated paths from a git command, streaming (an untracked tree can be huge), up to `max`. */
+function gitPaths(cwd: string, args: string[], max: number): Promise<{ paths: string[]; truncated: boolean }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', args, { cwd, stdio: ['ignore', 'pipe', 'ignore'] });
+    const paths: string[] = [];
+    let buf = '';
+    let truncated = false;
+    child.stdout!.on('data', (d: Buffer) => {
+      buf += d.toString();
+      let i: number;
+      while ((i = buf.indexOf('\0')) >= 0) {
+        if (paths.length >= max) {
+          truncated = true;
+          child.kill('SIGKILL');
+          return;
+        }
+        paths.push(buf.slice(0, i));
+        buf = buf.slice(i + 1);
+      }
     });
+    child.on('error', reject);
+    child.on('close', () => resolve({ paths, truncated }));
   });
 }
 
@@ -175,17 +227,124 @@ export class AgentTasks implements vscode.Disposable {
     }
   }
 
-  /** HEAD + uncommitted changes (tracked and untracked, .gitignore respected), without touching the user's index. */
-  private async snapshot(repo: string, dir: string): Promise<string> {
+  /** One snapshot at a time per repository: three tasks at once must not triple the work. */
+  private readonly snapshotLocks = new Map<string, Promise<unknown>>();
+
+  /**
+   * HEAD + uncommitted changes, without touching the user's index: tracked
+   * changes (except LFS-managed files) and untracked files within the budgets
+   * above (.gitignore respected). Returns the commit and a note of what was left
+   * out.
+   */
+  private async snapshot(repo: string, dir: string): Promise<{ commit: string; note?: string }> {
+    const prev = this.snapshotLocks.get(repo) ?? Promise.resolve();
+    const run = prev.catch(() => undefined).then(() => this.snapshotNow(repo, dir));
+    this.snapshotLocks.set(repo, run);
+    try {
+      return await run;
+    } finally {
+      if (this.snapshotLocks.get(repo) === run) this.snapshotLocks.delete(repo);
+    }
+  }
+
+  private async snapshotNow(repo: string, dir: string): Promise<{ commit: string; note?: string }> {
+    const T = { timeoutMs: SNAPSHOT_GIT_TIMEOUT_MS };
     const head = (await git(repo, ['rev-parse', '--verify', 'HEAD']).catch(() => '')).trim();
     if (!head) throw new Error('The repository has no commits yet — agent tasks start from one.');
+    // Every worktree is a full checkout of HEAD (LFS files stay pointers): refuse a huge one.
+    const sizes = await git(repo, ['ls-tree', '-r', '-l', '-z', 'HEAD'], undefined, T);
+    let checkout = 0;
+    for (const entry of sizes.split('\0')) {
+      const n = Number(entry.split(/\s+/)[3]);
+      if (Number.isFinite(n)) checkout += n;
+    }
+    if (checkout > CHECKOUT_MAX_BYTES) {
+      throw new Error(`A checkout of this repository's tracked files is ${(checkout / 1024 ** 3).toFixed(1)} GB — too big to copy for an agent task (limit ${CHECKOUT_MAX_BYTES / 1024 ** 3} GB).`);
+    }
     const index = path.join(dir, 'index');
     const real = path.resolve(repo, (await git(repo, ['rev-parse', '--git-path', 'index'])).trim());
     if (fs.existsSync(real)) fs.copyFileSync(real, index);
-    const env = { GIT_INDEX_FILE: index, ...IDENTITY };
-    await git(repo, ['add', '-A'], env);
-    const tree = (await git(repo, ['write-tree'], env)).trim();
-    return (await git(repo, ['commit-tree', tree, '-p', head, '-m', 'agent task base (HEAD + uncommitted changes)'], env)).trim();
+    const env = { GIT_INDEX_FILE: index, GIT_LITERAL_PATHSPECS: '1', ...IDENTITY };
+    const lfs = async (paths: string[]): Promise<Set<string>> => {
+      if (paths.length === 0) return new Set();
+      const out = await git(repo, ['check-attr', '-z', '--stdin', 'filter'], undefined, { ...T, input: paths.join('\0') + '\0' });
+      const parts = out.split('\0');
+      const hit = new Set<string>();
+      for (let i = 0; i + 2 < parts.length; i += 3) if (parts[i + 2] === 'lfs') hit.add(parts[i]);
+      return hit;
+    };
+    const addPaths = async (paths: string[]) => {
+      for (let i = 0; i < paths.length; i += 500) {
+        await git(repo, ['add', '-A', '--pathspec-from-file=-', '--pathspec-file-nul'], env, { ...T, input: paths.slice(i, i + 500).join('\0') });
+      }
+    };
+    const notes: string[] = [];
+
+    // Tracked changes (modified, deleted), minus LFS-managed files.
+    const changed = (await gitPaths(repo, ['diff', '--name-only', '-z', 'HEAD'], 100_000)).paths;
+    const lfsChanged = await lfs(changed);
+    await addPaths(changed.filter((p) => !lfsChanged.has(p)));
+    if (lfsChanged.size) notes.push(`${lfsChanged.size} modified Git LFS file(s) (e.g. ${[...lfsChanged][0]}) — the copy has their committed version`);
+
+    // Untracked files, by top-level group (a folder, or a file at the root), smallest
+    // groups first, each taken whole or not at all — a scratch folder full of files
+    // must not crowd out the few that matter, nor be half-copied.
+    const scan = await gitPaths(repo, ['ls-files', '-z', '--others', '--exclude-standard'], UNTRACKED_SCAN_MAX);
+    const lfsUntracked = await lfs(scan.paths.slice(0, 20_000));
+    const groups = new Map<string, { files: string[]; bytes: number }>();
+    let dropped = 0;
+    let droppedBytes = 0;
+    for (const p of scan.paths) {
+      let size = 0;
+      try {
+        size = fs.lstatSync(path.join(repo, p)).size;
+      } catch {
+        continue;
+      }
+      if (lfsUntracked.has(p) || size > UNTRACKED_FILE_MAX) {
+        dropped++;
+        droppedBytes += size;
+        continue;
+      }
+      const key = p.includes('/') ? `${p.split('/')[0]}/` : p;
+      const g = groups.get(key) ?? { files: [], bytes: 0 };
+      g.files.push(p);
+      g.bytes += size;
+      groups.set(key, g);
+    }
+    const take: string[] = [];
+    let total = 0;
+    const left: Array<[string, number, number]> = [];
+    for (const [key, g] of [...groups.entries()].sort((a, b) => a[1].bytes - b[1].bytes || a[1].files.length - b[1].files.length)) {
+      if (total + g.bytes <= UNTRACKED_TOTAL_MAX && take.length + g.files.length <= UNTRACKED_COUNT_MAX) {
+        take.push(...g.files);
+        total += g.bytes;
+      } else {
+        left.push([key, g.files.length, g.bytes]);
+      }
+    }
+    await addPaths(take);
+    if (dropped || left.length || scan.truncated) {
+      const parts: string[] = [];
+      if (left.length) {
+        parts.push(
+          left
+            .sort((a, b) => b[2] - a[2])
+            .slice(0, 4)
+            .map(([k, n, b]) => `${k} (${n.toLocaleString('en-US')} file${n === 1 ? '' : 's'}, ${(b / 1024 ** 2).toFixed(1)} MB)`)
+            .join(', ') + (left.length > 4 ? ` and ${left.length - 4} more` : '')
+        );
+      }
+      if (dropped) parts.push(`${dropped} large or LFS file(s), ${(droppedBytes / 1024 ** 3).toFixed(droppedBytes > 1024 ** 3 ? 1 : 3)} GB`);
+      if (scan.truncated) parts.push(`and more — over ${UNTRACKED_SCAN_MAX.toLocaleString('en-US')} untracked paths, the rest not looked at`);
+      notes.push(
+        `untracked ${parts.join('; ')} — over the snapshot budget (${UNTRACKED_FILE_MAX / 1024 ** 2} MB a file, ` +
+          `${UNTRACKED_TOTAL_MAX / 1024 ** 2} MB and ${UNTRACKED_COUNT_MAX.toLocaleString('en-US')} files in all); gitignore scratch data to keep it out`
+      );
+    }
+    const tree = (await git(repo, ['write-tree'], env, T)).trim();
+    const commit = (await git(repo, ['commit-tree', tree, '-p', head, '-m', 'agent task base (HEAD + uncommitted changes)'], env, T)).trim();
+    return { commit, note: notes.length ? `Left out of the worker's copy: ${notes.join('; ')}.` : undefined };
   }
 
   /**
@@ -209,7 +368,14 @@ export class AgentTasks implements vscode.Disposable {
       id, worker, task, context, after, status: 'queued', dir, repo, base: '', worktree: path.join(dir, 'worktree'),
       started: Date.now(), turns: 0, toolUses: 0, written: new Set(), waiters: [],
     };
-    if (!pred) t.base = await this.snapshot(repo, dir);
+    if (!pred) {
+      const snap = await this.snapshot(repo, dir);
+      t.base = snap.commit;
+      t.snapshotNote = snap.note;
+      if (snap.note) log(`agent task ${id}: ${snap.note}`);
+    } else {
+      t.snapshotNote = pred.snapshotNote;
+    }
     this.tasks.set(id, t);
     log(`agent task ${id}: queued on ${worker}${after ? ` after ${after}` : ''}`);
     await this.promote();
@@ -247,7 +413,8 @@ export class AgentTasks implements vscode.Disposable {
     const spec = await this.spec(t.worker);
     if (!spec) throw new Error(`"${t.worker}" is no longer enabled for agent tasks.`);
     const config = path.join(t.dir, 'config');
-    await git(t.repo, ['worktree', 'add', '--detach', t.worktree, t.base]);
+    // LFS files stay pointers: a checkout must not copy their content (10,861 of them in one repo).
+    await git(t.repo, ['worktree', 'add', '--detach', t.worktree, t.base], { GIT_LFS_SKIP_SMUDGE: '1' }, { timeoutMs: SNAPSHOT_GIT_TIMEOUT_MS });
     t.links = [];
     for (const name of DEP_DIRS) {
       const from = path.join(t.repo, name);
@@ -282,7 +449,10 @@ export class AgentTasks implements vscode.Disposable {
     t.status = 'running';
     t.started = Date.now();
     const prompt =
-      `${RUN_INSTRUCTIONS}${access ? CONSULT_INSTRUCTIONS : ''}\n\n<task>\n${t.task}\n</task>` +
+      `${RUN_INSTRUCTIONS}${access ? CONSULT_INSTRUCTIONS : ''}` +
+      ' Git LFS files in this copy are pointer files, not their content.' +
+      (t.snapshotNote ? ` ${t.snapshotNote}` : '') +
+      `\n\n<task>\n${t.task}\n</task>` +
       (t.context ? `\n\n<context>\n${t.context}\n</context>` : '');
     const args = [
       '-p', prompt, '--model', spec.runModel, '--permission-mode', 'auto',
@@ -470,7 +640,8 @@ export class AgentTasks implements vscode.Disposable {
     return {
       text: [
         `Task ${id}: ${t.status}${t.error ? ` (${t.error})` : ''} — ${t.worker}, ${secs} s, ${t.turns} turns${t.costUsd !== undefined ? `, ~$${t.costUsd.toFixed(3)} by Claude Code's estimate` : ''}.` +
-          (t.after ? ` Built on ${t.after}.` : ''),
+          (t.after ? ` Built on ${t.after}.` : '') +
+          (t.snapshotNote ? `\n${t.snapshotNote}` : ''),
         `\nWorker's report:\n${t.report ?? '(none)'}`,
         t.patchFile
           ? `\nChanges (against ${t.after ? `the result of ${t.after}` : "HEAD + the user's uncommitted changes at start"}):\n${t.stat}\n\n${diff}`
