@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { WindowBinding } from './binding';
+import type { Worker, WorkerSource } from './delegate';
 import { HostState } from './hostState';
 import { readIdentity } from './accounts';
 import { allWorkingDirs, workingRoot } from './workdir';
@@ -79,6 +80,8 @@ export interface Provider {
   disableBetas?: boolean;
   /** The shared (≤ 1.7) provider this one was adopted from, when its id changed — windows may still name it. */
   legacyId?: string;
+  /** Models of this provider the window's AI may consult as workers (see delegate.ts). Off when unset. */
+  workers?: string[];
 }
 
 /** Where versions up to 1.7 kept every provider: globalState, shared by every host and account. */
@@ -373,6 +376,27 @@ export async function testProvider(p: Provider, key: string): Promise<TestResult
   }
 }
 
+/** The models a provider can offer as workers, with a one-line note for the lead. */
+export function workerChoices(p: Provider): Array<{ model: string; note: string }> {
+  if (isNative(p)) {
+    return [
+      { model: 'claude-haiku-5-5', note: 'Claude Haiku — fast: summaries, bulk rewriting, quick checks' },
+      { model: 'claude-sonnet-5-5', note: 'Claude Sonnet — balanced: reviews, drafts, second opinions' },
+      { model: 'claude-opus-5-5', note: 'Claude Opus — strongest: hard reasoning, careful reviews' },
+    ];
+  }
+  if (p.preset === 'zai') {
+    return [
+      { model: 'glm-5.3', note: 'GLM-5.3 — second opinions, reviews, harder questions (slower)' },
+      { model: 'glm-5.3-flash', note: 'GLM-5.3-Flash — fast: summaries, bulk rewriting, quick checks' },
+    ];
+  }
+  const ids = p.catalog?.length
+    ? p.catalog.map((m) => m.gatewayId)
+    : Object.values(p.models ?? {}).filter((m): m is string => Boolean(m));
+  return [...new Set(ids.map((m) => m.replace(/(\[1m\])+$/i, '')))].map((model) => ({ model, note: `${model} on ${p.name}` }));
+}
+
 function formatModels(m: Provider['models']): string {
   return FAMILIES
     .filter((k) => m?.[k])
@@ -390,7 +414,7 @@ function parseModels(input: string): Provider['models'] | string {
   return models;
 }
 
-export class ProviderManager implements vscode.Disposable {
+export class ProviderManager implements vscode.Disposable, WorkerSource {
   /** Fires when this window's provider, or its definition, changes. */
   readonly onDidChange = new vscode.EventEmitter<void>();
 
@@ -533,6 +557,34 @@ export class ProviderManager implements vscode.Disposable {
     const dir = this.binding.getEnvDir();
     if (!dir || path.normalize(dir) !== path.normalize(this.binding.workingDir())) return undefined;
     return path.join(dir, 'settings.json');
+  }
+
+  /** This window's own CLAUDE_CONFIG_DIR, when it runs in one (see settingsFile). */
+  ownConfigDir(): string | undefined {
+    const file = this.settingsFile();
+    return file ? path.dirname(file) : undefined;
+  }
+
+  /** WorkerSource: every model of this account's providers enabled as a worker. */
+  workers(): Worker[] {
+    const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'provider';
+    return this.list().flatMap((p) => {
+      const notes = new Map(workerChoices(p).map((c) => [c.model, c.note]));
+      return (p.workers ?? []).map((model) => ({
+        id: `${slug(p.name)}/${model}`,
+        providerId: p.id,
+        providerName: p.name,
+        model,
+        baseUrl: isNative(p) ? ANTHROPIC_API : p.baseUrl,
+        auth: isNative(p) ? ('x-api-key' as const) : p.auth,
+        note: notes.get(model) ?? `${model} on ${p.name}`,
+      }));
+    });
+  }
+
+  /** WorkerSource: the provider's key, read from secret storage per call. */
+  keyFor(providerId: string): Promise<string | undefined> {
+    return Promise.resolve(this.context.secrets.get(this.secretKey(providerId)));
   }
 
   /**
@@ -1061,10 +1113,16 @@ export class ProviderManager implements vscode.Disposable {
     )?.provider;
     if (!target) return;
 
-    type Action = 'test' | 'key' | 'url' | 'auth' | 'models' | 'others' | 'refresh' | 'proxylog' | 'betas' | 'rename' | 'remove';
+    type Action = 'test' | 'workers' | 'key' | 'url' | 'auth' | 'models' | 'others' | 'refresh' | 'proxylog' | 'betas' | 'rename' | 'remove';
     type ActionItem = vscode.QuickPickItem & { action: Action };
     const common = (items: ActionItem[]): ActionItem[] => [
       { label: '$(pulse) Test connection', description: 'one tiny request, as Claude Code sends it', action: 'test' },
+      {
+        label: '$(organization) Workers',
+        description: target.workers?.length ? `${target.workers.join(', ')}` : 'off',
+        detail: "Let this window's AI consult this provider's models for focused tasks (answers only)",
+        action: 'workers',
+      },
       { label: '$(key) Replace key', action: 'key' },
       ...items,
       { label: '$(edit) Rename', action: 'rename' },
@@ -1129,6 +1187,39 @@ export class ProviderManager implements vscode.Disposable {
 
     const updated: Provider = { ...target };
     switch (action) {
+      case 'workers': {
+        const choices = workerChoices(target);
+        if (choices.length === 0) {
+          vscode.window.showInformationMessage(`${target.name} has no models to offer as workers yet — set its model aliases first.`);
+          return;
+        }
+        const on = new Set(target.workers ?? []);
+        const picked = await vscode.window.showQuickPick(
+          choices.map((c) => ({ label: c.model, description: c.note, picked: on.has(c.model) })),
+          {
+            title: `${target.name}: models this window's AI may consult as workers`,
+            placeHolder: 'Workers only answer — they cannot read files or run commands. None selected = off.',
+            canPickMany: true,
+          }
+        );
+        if (!picked) return;
+        const models = picked.map((i) => i.label);
+        const adding = models.filter((m) => !on.has(m));
+        if (adding.length > 0) {
+          const ok = await vscode.window.showWarningMessage(
+            `Let Claude Code in this account's windows send work to ${target.name} (${adding.join(', ')})?\n\n` +
+              `• The AI decides what to send: the task and the code or text it pastes in — that content goes to ` +
+              `${target.name}${isNative(target) ? '' : ' and the model\'s maker'}, billed to this key.\n` +
+              `• Workers only answer. They cannot read your files or run commands.\n` +
+              `• Off again any time here; the window log records each call (not its content).`,
+            { modal: true },
+            'Allow'
+          );
+          if (ok !== 'Allow') return;
+        }
+        updated.workers = models.length > 0 ? models : undefined;
+        break;
+      }
       case 'test': {
         const key = await this.context.secrets.get(this.secretKey(target.id));
         if (!key) throw new Error(`No key is stored for ${target.name}. Replace its key first.`);

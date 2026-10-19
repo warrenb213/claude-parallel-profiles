@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.10.0 — 2026-10-19
+
+### Added
+
+- **Workers: let the window's AI consult other models.** *Edit or Remove a Provider → Workers* enables some of a provider's models (e.g. GLM-5.3 and GLM-5.3-Flash on Z.ai, Claude models with an Anthropic API key) as workers. New Claude Code sessions in that account's windows get `list_workers` and `delegate`: the lead sends a focused task plus the material it chooses, the worker answers, and the lead checks the answer. Workers only answer — no file access, no commands.
+  - Served by a small MCP server inside the extension (127.0.0.1, random token); keys are read from secret storage per call and never written to a file. The window's own provider is unchanged, so a window on the Anthropic login keeps it.
+  - Opt-in per provider and model, off by default, with a confirmation of what leaves the machine. Limits: 120,000 characters out and 8,192 tokens back per call, 100 calls per window session. Each call is logged (worker, time, tokens — not content).
+  - Verified end to end: Claude Code called `delegate`, GLM-5.3-Flash on a Z.ai Coding Plan answered in ~3 s.
+- Also verified on Z.ai: auto mode's own safety checks run on GLM there, approving safe actions and blocking unsafe ones (e.g. piping a download into `sh`). Each check sends roughly 35K tokens of classifier instructions.
+
 ## 1.9.1 — 2026-10-19
 
 ### Added

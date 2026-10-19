@@ -11,6 +11,7 @@ import { defaultSourceDir } from './capture';
 import { AccountWatcher } from './accountWatcher';
 import { HostState } from './hostState';
 import { ProviderManager } from './providers';
+import { DelegateServer } from './delegate';
 import { allWorkingDirs, workingRoot } from './workdir';
 import { removeStrayLinks } from './litellm';
 import { log, showLog } from './log';
@@ -258,7 +259,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // Not part of the activation race: settings.json is read by each `claude` when
   // it starts, and it already carries the provider written at the last switch.
-  void providers.migrate().then(() => providers.sync());
+  // Workers (delegate.ts): registered in this window's own config while any are enabled.
+  const workers = new DelegateServer(providers, () => providers.ownConfigDir());
+  context.subscriptions.push(workers);
+  void providers.migrate().then(async () => {
+    await providers.sync();
+    await workers.reconcile();
+  });
   providers.warnAboutSharedOverride();
 
   // An account handoff finishes with a reload, which kills any toast raised
