@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.13.0 — 2026-10-19
+
+### Added
+
+- **Open sessions see worker changes live.** The workers server now keeps the notification stream Claude Code opens and sends `tools/list_changed` when workers or agent tasks are switched on or off; open sessions re-read their tools instead of keeping the list they started with. Verified in an interactive session: a worker enabled mid-session was used from that same session.
+- **Agent tasks can build and test.** Gitignored dependency folders at the top of the repo (`node_modules`, `.venv`, `venv`, `vendor`, `.bundle`, …) are linked into the task's worktree, so the worker can run builds and tests; the links are removed before its changes are collected and are never part of a diff. Verified with a GLM-5.3 run that needed a package from a linked `node_modules`.
+
+### Changed
+
+- **The pre-1.8 shared provider copy is removed.** Once a host has adopted its providers, the old client-wide provider list and its key entries (e.g. an old Poe key) are deleted from VS Code's storage. A host still on 1.7 or earlier then starts with no providers.
+
 ## 1.12.2 — 2026-10-19
 
 ### Fixed

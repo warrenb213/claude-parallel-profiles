@@ -69,6 +69,8 @@ interface Task {
   written: Set<string>;
   /** New files that only appeared as side effects of commands (build output, caches) — left out of the patch. */
   sideEffects?: string[];
+  /** Dependency folders linked into the worktree (DEP_DIRS). */
+  links?: string[];
   applied?: boolean;
   waiters: Array<() => void>;
 }
@@ -78,6 +80,14 @@ const MAX_TURNS = 80;
 const WALL_MS = 30 * 60_000;
 const KEEP_DAYS = 7;
 const MAX_DIFF_IN_RESULT = 60_000;
+
+/**
+ * Dependency folders a worktree lacks — they're gitignored, so a snapshot
+ * leaves them out — linked in from the user's repo so an agent can build and
+ * test (GLM couldn't typecheck this very repo without node_modules). Top-level
+ * only; each link is removed again before the changes are collected.
+ */
+const DEP_DIRS = ['node_modules', '.venv', 'venv', '.virtualenv', 'vendor', '.bundle', 'bower_components', 'Pods', '.gradle'];
 
 /** The workers MCP server, as agent runs see it (restricted token: consult tools only). */
 const CONSULT_SERVER = 'claude-accounts-workers';
@@ -106,7 +116,9 @@ const IDENTITY = {
 const RUN_INSTRUCTIONS =
   "You are a worker agent. You are in a scratch git worktree: a copy of the user's repository, made for this " +
   'task alone. Make the changes the task needs here, and verify them (build, tests) where it makes sense. ' +
-  'Do not commit, push, or touch anything outside this directory. Another AI (the lead) will review your ' +
+  'Do not commit, push, or touch anything outside this directory. Dependency folders such as node_modules ' +
+  "or .venv may be links to the user's own copies: use them to build and test, but don't install into or " +
+  'modify them. Another AI (the lead) will review your ' +
   'changes as a diff before anything reaches the user. Finish with a short report: what you changed and why, ' +
   'what you ran to verify it and the results, and anything left open.';
 
@@ -236,6 +248,20 @@ export class AgentTasks implements vscode.Disposable {
     if (!spec) throw new Error(`"${t.worker}" is no longer enabled for agent tasks.`);
     const config = path.join(t.dir, 'config');
     await git(t.repo, ['worktree', 'add', '--detach', t.worktree, t.base]);
+    t.links = [];
+    for (const name of DEP_DIRS) {
+      const from = path.join(t.repo, name);
+      const to = path.join(t.worktree, name);
+      try {
+        if (!fs.statSync(from).isDirectory() || fs.existsSync(to)) continue;
+        await git(t.repo, ['check-ignore', '-q', name]); // throws unless ignored
+        fs.symlinkSync(from, to, 'dir');
+        t.links.push(name);
+      } catch {
+        /* not there, not ignored, or not linkable */
+      }
+    }
+    if (t.links.length) log(`agent task ${t.id}: linked ${t.links.join(', ')} from the repo`);
     fs.writeFileSync(path.join(config, 'settings.json'), JSON.stringify(spec.settings, null, 2), { mode: 0o600 });
     // Workers can consult: the workers server with the restricted token (delegate, list_workers, provider_usage).
     const access = this.access?.();
@@ -332,6 +358,15 @@ export class AgentTasks implements vscode.Disposable {
   }
 
   private async finish(t: Task, code: number | null): Promise<void> {
+    // The dependency links go first: they're the user's folders, never the task's changes.
+    for (const name of t.links ?? []) {
+      try {
+        const link = path.join(t.worktree, name);
+        if (fs.lstatSync(link).isSymbolicLink()) fs.unlinkSync(link);
+      } catch {
+        /* already gone */
+      }
+    }
     try {
       await git(t.worktree, ['add', '-A']);
       // Changes to files that existed land; new files only if the worker wrote
@@ -541,6 +576,13 @@ export class AgentTasks implements vscode.Disposable {
     for (const t of this.tasks.values()) {
       if (t.status !== 'running') continue;
       t.child?.kill('SIGKILL');
+      for (const name of t.links ?? []) {
+        try {
+          fs.unlinkSync(path.join(t.worktree, name)); // the user's own folders: unlink, never recurse
+        } catch {
+          /* gone */
+        }
+      }
       try {
         execFileSync('git', ['worktree', 'remove', '--force', t.worktree], { cwd: t.repo, stdio: 'ignore' });
       } catch {

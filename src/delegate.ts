@@ -215,6 +215,11 @@ export class DelegateServer implements vscode.Disposable {
   private readonly workerToken = crypto.randomBytes(24).toString('hex');
   private calls = 0;
   readonly usage = new UsageBook();
+  /** Open GET event streams (sessions listening for server notifications). */
+  private readonly streams = new Set<http.ServerResponse>();
+  private heartbeat: NodeJS.Timeout | undefined;
+  /** The tool lists last announced, to notify only on a real change. */
+  private lastTools = '';
   private readonly subscription: vscode.Disposable;
 
   /** `configDir`: this window's CLAUDE_CONFIG_DIR (its own working dir), or undefined when unbound. */
@@ -232,7 +237,9 @@ export class DelegateServer implements vscode.Disposable {
     const want = Boolean(dir) && this.source.workers().length > 0;
     try {
       if (want) {
+        const wasUp = Boolean(this.server);
         await this.start();
+        if (wasUp) this.notifyToolsChanged();
         register(dir!, {
           type: 'http',
           url: `http://127.0.0.1:${this.port}/mcp`,
@@ -256,6 +263,7 @@ export class DelegateServer implements vscode.Disposable {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', () => {
         this.port = (server.address() as { port: number }).port;
+        this.lastTools = JSON.stringify([this.tools(true), this.tools(false)]);
         log(`workers: MCP server on 127.0.0.1:${this.port} (${this.source.workers().map((w) => w.id).join(', ')})`);
         resolve();
       });
@@ -263,8 +271,26 @@ export class DelegateServer implements vscode.Disposable {
   }
 
   private stop(): void {
+    for (const s of this.streams) s.end();
+    this.streams.clear();
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    this.heartbeat = undefined;
     this.server?.close();
     this.server = undefined;
+  }
+
+  /**
+   * Tells listening sessions their tool list changed (workers enabled or
+   * removed, agent tasks switched on), so open Claude Code sessions re-read it
+   * instead of keeping the list they started with.
+   */
+  private notifyToolsChanged(): void {
+    const now = JSON.stringify([this.tools(true), this.tools(false)]);
+    if (now === this.lastTools) return;
+    this.lastTools = now;
+    const event = `event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' })}\n\n`;
+    for (const s of this.streams) s.write(event);
+    if (this.streams.size) log(`workers: told ${this.streams.size} session(s) the tools changed`);
   }
 
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -274,6 +300,17 @@ export class DelegateServer implements vscode.Disposable {
     };
     const lead = req.headers.authorization === `Bearer ${this.token}`;
     if (!lead && req.headers.authorization !== `Bearer ${this.workerToken}`) return send(401, { error: 'unauthorized' });
+    if (req.method === 'GET' && String(req.headers.accept ?? '').includes('text/event-stream')) {
+      // A session listening for notifications (tools/list_changed).
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
+      res.write(': listening\n\n');
+      this.streams.add(res);
+      req.on('close', () => this.streams.delete(res));
+      // Comments keep idle connections from being dropped; clients ignore them.
+      this.heartbeat ??= setInterval(() => this.streams.forEach((s) => s.write(': ping\n\n')), 25_000);
+      return;
+    }
+    if (req.method === 'DELETE') return send(200);
     if (req.method !== 'POST') return send(405);
     let raw = '';
     for await (const chunk of req) {
@@ -293,7 +330,7 @@ export class DelegateServer implements vscode.Disposable {
       case 'initialize':
         return reply({
           protocolVersion: typeof msg.params?.protocolVersion === 'string' ? msg.params.protocolVersion : '2025-06-18',
-          capabilities: { tools: {} },
+          capabilities: { tools: { listChanged: true } },
           serverInfo: { name: SERVER_NAME, version: '1' },
           instructions:
             'Other AI models (workers) the user enabled. `delegate` asks one a question (answers only). ' +

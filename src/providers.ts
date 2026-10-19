@@ -496,7 +496,7 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
    * version read them, and other hosts adopt from them when they update.
    */
   async migrate(): Promise<void> {
-    if (this.state.get<boolean>('claudeProfiles.providersMigrated')) return;
+    if (this.state.get<boolean>('claudeProfiles.providersMigrated')) return this.dropLegacy();
     const legacy = this.context.globalState.get<Provider[]>(LEGACY_PROVIDERS_KEY, []);
     // Several windows may activate at once: one adopts, the others wait for it.
     const lock = path.join(workingRoot(), '.providers-migration.lock');
@@ -550,6 +550,27 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
     } finally {
       fs.rmSync(lock, { force: true });
     }
+    await this.dropLegacy();
+  }
+
+  /**
+   * The ≤ 1.7 shared copy — every provider and its key, client-wide — once this
+   * host has adopted what it needs. Removed so no stale key lingers in secret
+   * storage (user's choice in 1.13). A host still on ≤ 1.7 then starts with no
+   * providers; one on ≥ 1.8 that hasn't migrated yet adopts nothing.
+   */
+  private async dropLegacy(): Promise<void> {
+    const legacy = this.context.globalState.get<Provider[]>(LEGACY_PROVIDERS_KEY);
+    if (!legacy) return;
+    for (const p of legacy) {
+      try {
+        await this.context.secrets.delete(legacySecretKey(p.id));
+      } catch {
+        /* already gone */
+      }
+    }
+    await this.context.globalState.update(LEGACY_PROVIDERS_KEY, undefined);
+    log(`providers: removed the pre-1.8 shared copy (${legacy.map((p) => p.name).join(', ') || 'empty'}) and its key entries`);
   }
 
   /** The provider this window bills to; undefined = its Anthropic login. */
