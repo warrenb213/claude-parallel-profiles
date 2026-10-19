@@ -341,8 +341,8 @@ export class StatusBarManager implements vscode.Disposable {
       return;
     }
     if (others.length > 0) {
-      // There is something to switch to; the list includes "Save current…"
-      // when the current account isn't saved yet.
+      // There is something to switch to. (A new account is saved on its own by
+      // reconcile; *Save* in the hover covers the rare case it wasn't.)
       await vscode.commands.executeCommand('claudeProfiles.switchAccount');
       return;
     }

@@ -27,9 +27,9 @@ import { log, showLog } from './log';
  * sees no credential files). So elsewhere the extension must not guess: it
  * activates into an INERT mode that touches nothing and says why.
  *
- * The Marketplace additionally publishes Linux-only packages, so this mode is
- * normally reached only by a side-loaded VSIX. The check runs where the
- * extension actually executes — in a WSL/SSH/container window that's the
+ * The package is universal (see release.yml for why), so it installs on every
+ * platform and this mode is what non-Linux installs get. The check runs where
+ * the extension actually executes — in a WSL/SSH/container window that's the
  * REMOTE side (extensionKind "workspace"), so a Windows desktop driving a
  * Linux remote is fully supported and never lands here.
  */

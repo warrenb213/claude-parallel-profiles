@@ -36,6 +36,48 @@ const REGISTRY_KEY = 'claudeProfiles.accounts';
  * instead of snapshotting a duplicate of the same OAuth token.
  */
 const FORGOTTEN_KEY = 'claudeProfiles.forgottenAccounts';
+const CLASSIFIED_KEY = 'claudeProfiles.storesClassified';
+
+/**
+ * Marks an account store this extension CREATED. Uninstall deletes a store only
+ * if it carries this file: a `~/.claude-<name>` dir that was already there and
+ * got adopted (discoverAndMerge) is the user's own, and keeps its login and its
+ * files — it only loses the history links this extension put in it. Kept in sync
+ * with STORE_MARKER in uninstall.js.
+ */
+export const STORE_MARKER = '.claude-parallel-accounts';
+
+export function markCreated(dir: string): void {
+  try {
+    fs.writeFileSync(
+      path.join(dir, STORE_MARKER),
+      JSON.stringify({ createdBy: 'claude-parallel-accounts', at: new Date().toISOString() }) + '\n',
+      { mode: 0o600 }
+    );
+  } catch {
+    /* unmarked → kept at uninstall: the safe side */
+  }
+}
+
+/**
+ * The store name for an email: its local part first, then local part + domain
+ * (daniil@gmail.com vs daniil@work.dev → `daniil`, `daniil-work-dev`), then a
+ * numeric suffix as a last resort.
+ */
+export function suggestName(email: string, available: (n: string) => boolean): string {
+  const all = nameCandidates(email);
+  return all.find(available) ?? all[0];
+}
+
+/** Every name suggestName can give an email, in its order of preference. */
+function nameCandidates(email: string): string[] {
+  const slug = (s: string) =>
+    s.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'account';
+  const [local = 'account', domain = ''] = email.split('@');
+  const base = [slug(local), domain ? slug(`${local}-${domain}`) : ''].filter(Boolean);
+  const numbered = Array.from({ length: 98 }, (_, i) => `${base[0]}${i + 2}`);
+  return [...base, ...numbered];
+}
 
 /** Parses oauthAccount identity out of a single .claude.json file. */
 function readIdentityFile(file: string): AccountIdentity | null {
@@ -208,6 +250,27 @@ export class AccountRegistry {
   }
 
 
+  /**
+   * Once per host: stores saved by versions before the marker existed get one if
+   * this extension evidently created them — named the way it names an account's
+   * store after that account's email. Anything else is treated as adopted and
+   * kept at uninstall. (An adopted dir that happens to carry exactly that name is
+   * the one case this can't tell apart; it is handled as before, i.e. deleted
+   * after its history is moved.)
+   */
+  private async classifyExistingStores(): Promise<void> {
+    if (this.state.get<boolean>(CLASSIFIED_KEY, false)) return;
+    for (const a of [...this.list(), ...this.listForgotten()]) {
+      if (fs.existsSync(path.join(a.dir, STORE_MARKER))) continue;
+      const email = a.email ?? readIdentity(a.dir)?.email;
+      const base = path.basename(a.dir);
+      if (email && base.startsWith('.claude-') && nameCandidates(email).includes(base.slice('.claude-'.length))) {
+        markCreated(a.dir);
+      }
+    }
+    await this.state.update(CLASSIFIED_KEY, true);
+  }
+
   /** Moves an account from the registry to the forgotten list. Dir stays on disk. */
   async forget(account: Account): Promise<void> {
     await this.remove(account.name);
@@ -237,6 +300,7 @@ export class AccountRegistry {
    * merges any that aren't in the registry yet. Non-destructive.
    */
   async discoverAndMerge(): Promise<Account[]> {
+    await this.classifyExistingStores(); // before discovery: what it finds now is adopted
     const home = os.homedir();
     const found: Account[] = [];
     let entries: fs.Dirent[] = [];

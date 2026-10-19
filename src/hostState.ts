@@ -39,6 +39,8 @@ const KEYS = [
   'claudeProfiles.hostId',
   /** Claude models on each account's own Anthropic login enabled as workers, by email. */
   'claudeProfiles.loginWorkers',
+  /** Set once this host's existing account stores were sorted into created vs adopted (accounts.ts). */
+  'claudeProfiles.storesClassified',
 ] as const;
 export type HostStateKey = (typeof KEYS)[number];
 

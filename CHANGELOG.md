@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.14.2 — 2026-10-19
+
+### Fixed
+
+- **Uninstalling could delete a `~/.claude-<name>` folder you made yourself.** The extension adopts any signed-in `~/.claude-<name>` folder it finds as an account, and listed it with the stores it created; uninstall then deleted it after moving its history into `~/.claude` — along with its settings, plugins and anything else in it. Stores the extension creates now carry a marker (`.claude-parallel-accounts`), and uninstall deletes only those. An adopted folder keeps its login and files; only the history links the extension put in it are removed. Stores saved by earlier versions are sorted once on upgrade: one named after its account's email, as the extension names them, counts as created; anything else is kept.
+- The history merge's backup folder (`~/.claude-shared/.merge-backup`) is now created owner-only, like everything else.
+- Two stale code comments (the status bar's click action, and how non-Linux installs reach the inert mode).
+
+### Changed
+
+- **README rewritten** for this fork: an architecture diagram and workflow diagrams (window start-up, sign-in, forget, shared history, providers, workers, `delegate`, agent tasks and their states, uninstall), install from `.vsix`, a commands table, and corrections where it had drifted from the code — every network request listed in *Privacy*, the real bundle size, sign-out handling, what uninstall removes.
+
 ## 1.14.1 — 2026-10-19
 
 ### Fixed

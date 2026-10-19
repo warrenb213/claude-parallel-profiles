@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { Account, AccountRegistry, readIdentity, hasCredentials } from './accounts';
+import { Account, AccountRegistry, readIdentity, hasCredentials, markCreated, suggestName } from './accounts';
 import { WindowBinding } from './binding';
 import { getAuthStatus, AuthStatus } from './cli';
 import { snapshotAccount, defaultSourceDir, mirrorToDefault } from './capture';
@@ -179,6 +179,7 @@ export class SetupWizard {
 
     try {
       snapshotAccount(sourceDir, target.dir, status);
+      if (!restored) markCreated(target.dir); // ours: uninstall may delete it (see STORE_MARKER)
     } catch (err) {
       vscode.window.showErrorMessage(`Could not save account: ${(err as Error).message}`);
       return undefined;
@@ -495,20 +496,4 @@ export class SetupWizard {
     }
     vscode.window.showInformationMessage(parts.join(' '));
   }
-}
-
-/**
- * Derives a directory slug from an email. Tries the local part first; if that is
- * taken (same local part, different domain — daniil@gmail.com vs daniil@work.dev)
- * it disambiguates with the domain rather than an opaque counter: `daniil`, then
- * `daniil-work-dev`. A numeric suffix is the last resort only.
- */
-function suggestName(email: string, available: (n: string) => boolean): string {
-  const slug = (s: string) =>
-    s.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'account';
-  const [local = 'account', domain = ''] = email.split('@');
-  const candidates = [slug(local), domain ? slug(`${local}-${domain}`) : ''].filter(Boolean);
-  for (const c of candidates) if (available(c)) return c;
-  for (let i = 2; i < 100; i++) if (available(`${candidates[0]}${i}`)) return `${candidates[0]}${i}`;
-  return candidates[0];
 }

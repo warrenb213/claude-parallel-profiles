@@ -132,7 +132,7 @@ function mergeDirInto(src: string, dst: string, store: string): void {
     // Genuinely different: keep the newer, back up the older.
     const loser = srcStat.mtimeMs > dstStat.mtimeMs ? d : s;
     const backup = path.join(store, '.merge-backup', path.relative(store, dst), `${entry.name}.${Date.now()}`);
-    fs.mkdirSync(path.dirname(backup), { recursive: true });
+    fs.mkdirSync(path.dirname(backup), { recursive: true, mode: 0o700 });
     fs.renameSync(loser, backup);
     if (loser === d) fs.renameSync(s, d);
   }

@@ -48,6 +48,14 @@ const SHARED_FILES = ['history.jsonl'];
 const SHARED_ENTRIES = [...SHARED_DIRS, ...SHARED_FILES];
 
 /**
+ * Kept in sync with STORE_MARKER in src/accounts.ts: the file in an account store
+ * this extension created. A managed store without it was already on disk and got
+ * adopted — the user's own dir, never deleted.
+ */
+const STORE_MARKER = '.claude-parallel-accounts';
+const createdByUs = (dir) => fs.existsSync(path.join(dir, STORE_MARKER));
+
+/**
  * Our own budget, comfortably inside VSCode's 5s kill timer. Being killed is not
  * an option: it happens between two syscalls of our choosing, so there is no way
  * to be safe against it — we simply must not still be running. Every loop that can
@@ -335,6 +343,24 @@ function restoreDefaultAccount(source, defaultDir, defaultConfig) {
   }
 }
 
+/**
+ * An adopted store stays, with its own login and files; only the history links
+ * this extension put in it go (they'd dangle once the store has moved into
+ * ~/.claude, which is where that history now is).
+ */
+function unlinkSharedLinks(dir, store) {
+  for (const name of SHARED_ENTRIES) {
+    const link = path.join(dir, name);
+    try {
+      if (!fs.lstatSync(link).isSymbolicLink()) continue;
+      const target = path.resolve(dir, fs.readlinkSync(link));
+      if (target === path.join(store, name) || target.startsWith(store + path.sep)) fs.unlinkSync(link);
+    } catch {
+      /* not there */
+    }
+  }
+}
+
 /** Deletes the OAuth token from our dirs. The one step that must happen even when we bail out. */
 function dropTokens(dirs) {
   for (const dir of dirs) {
@@ -400,7 +426,10 @@ function main() {
 
   const working = workingDirs(workRoot);
   const stores = managedStores(home, path.join(workRoot, '.manifest.json'));
-  const ours = [...working, ...stores];
+  // Only stores we created are deleted; adopted ones are the user's and stay.
+  const created = stores.filter(createdByUs);
+  const adopted = stores.filter((d) => !createdByUs(d));
+  const ours = [...working, ...created];
 
   // 1. Leave Claude Code working. Cheap, and everything after it is optional.
   const source = lastUsedDir(working, stores);
@@ -417,10 +446,12 @@ function main() {
     return;
   }
 
-  // 4. Everything is safe in ~/.claude. Our dirs hold nothing but duplicated
+  // 4. Everything is safe in ~/.claude. Adopted stores keep their login and
+  //    files, minus our history links; the rest of our dirs hold nothing but duplicated
   //    credentials, config and dangling symlinks (rmSync does not follow those,
   //    so the store's content is never at risk here). A short-lived earlier
   //    version also kept token copies in ~/.claude-vault.
+  for (const dir of adopted) unlinkSharedLinks(dir, store);
   for (const dir of [...ours, workRoot, store, path.join(home, '.claude-vault')]) {
     try {
       fs.rmSync(dir, { recursive: true, force: true });
