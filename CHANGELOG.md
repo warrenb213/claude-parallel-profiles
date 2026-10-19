@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.12.1 — 2026-10-19
+
+### Fixed
+
+Found validating workers from a real Claude Code session:
+
+- **Slow consults failed with "The operation timed out."** Claude Code gives an MCP call 60 s unless the server entry sets `timeout`, and drops an HTTP MCP call that stays silent for 5 minutes. A consult on the Anthropic login that hit a network stall took 143 s — it finished, but the lead had already given up. The workers server is now registered with `timeout: 295000`; worker calls end within 270 s and `wait_task` waits at most 240 s per call (call it again for longer tasks). A 75-second consult was verified through Claude Code.
+- **Workers enabled after a session started couldn't be named.** `delegate` and `start_task` listed the workers as an enum, which a running session keeps from its start. The schemas no longer fix the list; the server checks the name and an unknown one is answered with the workers enabled now.
+- **GLM workers returned an empty answer.** GLM thinks by default and its thinking counts against `max_tokens` — with a 400-token cap, GLM-5.3-Flash spent all of it thinking. Worker calls now add 8,192 tokens of room for reasoning on top of the answer cap, and a reply that still has no text is asked again with thinking off.
+
 ## 1.12.0 — 2026-10-19
 
 ### Added

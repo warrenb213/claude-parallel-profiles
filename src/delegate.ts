@@ -65,7 +65,15 @@ const MAX_OUTPUT_TOKENS = 8_192;
 const DEFAULT_OUTPUT_TOKENS = 4_096;
 /** Per window session (extension host lifetime). */
 const MAX_CALLS = 100;
-const CALL_TIMEOUT_MS = 10 * 60_000;
+/**
+ * Claude Code waits 60 s for an MCP call unless the server entry sets
+ * `timeout`, and drops an HTTP MCP call that stays silent for 5 minutes
+ * (CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT). This server answers each call in one
+ * piece, so every call must finish inside that: the entry asks for just under
+ * 5 minutes, and calls give up before it.
+ */
+export const MCP_CALL_TIMEOUT_MS = 295_000;
+const CALL_TIMEOUT_MS = 270_000;
 
 const WORKER_SYSTEM =
   'You are a worker model consulted by another AI assistant (the lead), which is helping a user with ' +
@@ -75,7 +83,14 @@ const WORKER_SYSTEM =
 
 type Json = Record<string, unknown>;
 
-/** The worker call itself: one Anthropic Messages request to the worker's provider. */
+/**
+ * Room for reasoning on top of the answer cap. Models such as GLM think by
+ * default and their thinking counts against max_tokens: with a 400-token cap,
+ * GLM-5.3-Flash spent all 400 thinking and wrote no answer.
+ */
+const THINKING_HEADROOM = 8_192;
+
+/** The worker call itself: an Anthropic Messages request to the worker's provider. */
 export async function callWorker(
   w: Worker,
   key: string,
@@ -89,29 +104,35 @@ export async function callWorker(
   else headers.authorization = `Bearer ${key}`;
   const content = context ? `${task}\n\n<context>\n${context}\n</context>` : task;
   const started = Date.now();
-  const res = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      model: w.model,
-      max_tokens: maxTokens,
-      system: WORKER_SYSTEM,
-      messages: [{ role: 'user', content }],
-    }),
-    signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
-  });
-  const body = (await res.json().catch(() => ({}))) as {
+  type Reply = {
     content?: Array<{ type?: string; text?: string }>;
+    stop_reason?: string;
     usage?: { input_tokens?: number; output_tokens?: number };
     error?: { message?: string };
   };
-  if (!res.ok) throw new Error(`${w.providerName} answered HTTP ${res.status}: ${body.error?.message ?? 'no details'}`);
-  const text = (body.content ?? [])
-    .filter((b) => b.type === 'text' && typeof b.text === 'string')
-    .map((b) => b.text)
-    .join('\n')
-    .trim();
-  return { text, inputTokens: body.usage?.input_tokens, outputTokens: body.usage?.output_tokens, ms: Date.now() - started };
+  const send = async (extra: Record<string, unknown>): Promise<Reply> => {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ model: w.model, system: WORKER_SYSTEM, messages: [{ role: 'user', content }], ...extra }),
+      signal: AbortSignal.timeout(CALL_TIMEOUT_MS - (Date.now() - started)),
+    });
+    const body = (await res.json().catch(() => ({}))) as Reply;
+    if (!res.ok) throw new Error(`${w.providerName} answered HTTP ${res.status}: ${body.error?.message ?? 'no details'}`);
+    return body;
+  };
+  const textOf = (b: Reply) =>
+    (b.content ?? []).filter((c) => c.type === 'text' && typeof c.text === 'string').map((c) => c.text).join('\n').trim();
+  let body = await send({ max_tokens: maxTokens + THINKING_HEADROOM });
+  let inTok = body.usage?.input_tokens ?? 0;
+  let outTok = body.usage?.output_tokens ?? 0;
+  if (!textOf(body) && body.stop_reason === 'max_tokens') {
+    // It thought through the whole budget: ask again for a direct answer.
+    body = await send({ max_tokens: maxTokens, thinking: { type: 'disabled' } });
+    inTok += body.usage?.input_tokens ?? 0;
+    outTok += body.usage?.output_tokens ?? 0;
+  }
+  return { text: textOf(body), inputTokens: inTok, outputTokens: outTok, ms: Date.now() - started };
 }
 
 /**
@@ -212,7 +233,12 @@ export class DelegateServer implements vscode.Disposable {
     try {
       if (want) {
         await this.start();
-        register(dir!, { type: 'http', url: `http://127.0.0.1:${this.port}/mcp`, headers: { Authorization: `Bearer ${this.token}` } });
+        register(dir!, {
+          type: 'http',
+          url: `http://127.0.0.1:${this.port}/mcp`,
+          headers: { Authorization: `Bearer ${this.token}` },
+          timeout: MCP_CALL_TIMEOUT_MS,
+        });
       } else {
         if (dir) register(dir, undefined);
         this.stop();
@@ -312,7 +338,9 @@ export class DelegateServer implements vscode.Disposable {
         inputSchema: {
           type: 'object',
           properties: {
-            worker: { type: 'string', enum: ids, description: 'Which worker (see list_workers).' },
+            // No enum: a session keeps the tool definitions it started with, so a list here
+            // would go stale when the user changes workers. list_workers is always current.
+            worker: { type: 'string', description: `Which worker — see list_workers (at session start: ${ids.join(', ')}).` },
             task: { type: 'string', description: 'What to do, stated completely.' },
             context: { type: 'string', description: 'The material to work on: code, text, notes.' },
             max_tokens: {
@@ -354,7 +382,7 @@ export class DelegateServer implements vscode.Disposable {
         inputSchema: {
           type: 'object',
           properties: {
-            worker: { type: 'string', enum: ids },
+            worker: { type: 'string', description: `An agent-enabled worker — see list_workers (at session start: ${ids.join(', ')}).` },
             task: { type: 'string', description: 'The job, stated completely, with how to verify it.' },
             context: { type: 'string', description: 'Anything it needs beyond the repo itself.' },
             after: {
@@ -372,7 +400,7 @@ export class DelegateServer implements vscode.Disposable {
         description: "Wait for an agent task (up to `seconds`), then return its status — or, when done, the worker's report and the diff of its changes.",
         inputSchema: {
           type: 'object',
-          properties: { task_id: id, seconds: { type: 'integer', minimum: 1, maximum: 600, description: 'How long to wait (default 120).' } },
+          properties: { task_id: id, seconds: { type: 'integer', minimum: 1, maximum: 240, description: 'How long to wait, at most 240 s (default 120); call again if it is still running.' } },
           required: ['task_id'],
         },
       },
@@ -416,7 +444,10 @@ export class DelegateServer implements vscode.Disposable {
         const id = String(args.task_id ?? '');
         if (name === 'start_task') {
           const w = this.source.workers().find((x) => x.id === args.worker && x.agent);
-          if (!w) return text(`No worker "${String(args.worker)}" enabled for agent tasks.`, true);
+          if (!w) {
+            const agentIds = this.source.workers().filter((x) => x.agent).map((x) => x.id);
+            return text(`No worker "${String(args.worker)}" enabled for agent tasks. Enabled now: ${agentIds.join(', ') || 'none'}.`, true);
+          }
           const task = typeof args.task === 'string' ? args.task.trim() : '';
           if (!task) return text('`task` is required.', true);
           const context = typeof args.context === 'string' ? args.context : undefined;
@@ -442,7 +473,9 @@ export class DelegateServer implements vscode.Disposable {
     }
     if (name !== 'delegate') return text(`Unknown tool ${name}.`, true);
     const w = this.source.workers().find((x) => x.id === args.worker);
-    if (!w) return text(`No enabled worker "${String(args.worker)}". Call list_workers.`, true);
+    if (!w) {
+      return text(`No enabled worker "${String(args.worker)}". Enabled now: ${this.source.workers().map((x) => x.id).join(', ') || 'none'}.`, true);
+    }
     const task = typeof args.task === 'string' ? args.task.trim() : '';
     const context = typeof args.context === 'string' ? args.context : undefined;
     if (!task) return text('`task` is required.', true);

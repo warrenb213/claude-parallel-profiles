@@ -5,6 +5,7 @@ import * as crypto from 'crypto';
 import { execFile, execFileSync, spawn, ChildProcess } from 'child_process';
 import { workingRoot } from './workdir';
 import { log } from './log';
+import { MCP_CALL_TIMEOUT_MS } from './delegate';
 
 /**
  * Agent tasks: a worker that does real work, not just answers.
@@ -244,7 +245,11 @@ export class AgentTasks implements vscode.Disposable {
         hasCompletedOnboarding: true,
         projects: { [t.worktree]: { hasTrustDialogAccepted: true } },
         ...(spec.approveKeyTail && { customApiKeyResponses: { approved: [spec.approveKeyTail], rejected: [] } }),
-        ...(access && { mcpServers: { [CONSULT_SERVER]: { type: 'http', url: access.url, headers: { Authorization: `Bearer ${access.token}` } } } }),
+        ...(access && {
+          mcpServers: {
+            [CONSULT_SERVER]: { type: 'http', url: access.url, headers: { Authorization: `Bearer ${access.token}` }, timeout: MCP_CALL_TIMEOUT_MS },
+          },
+        }),
       }),
       { mode: 0o600 }
     );
@@ -407,7 +412,8 @@ export class AgentTasks implements vscode.Disposable {
     if (!t) return { text: `No task ${id} in this window.`, isError: true };
     if (t.status === 'running' || t.status === 'queued') {
       await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, Math.min(Math.max(seconds, 1), 600) * 1000);
+        // At most 240 s: the whole MCP call must end inside Claude Code's 5-minute idle limit.
+        const timer = setTimeout(resolve, Math.min(Math.max(seconds, 1), 240) * 1000);
         t.waiters.push(() => {
           clearTimeout(timer);
           resolve();
