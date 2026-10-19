@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.12.2 — 2026-10-19
+
+### Fixed
+
+- The proxy's version check treated an unparsable *recorded* version inconsistently: `olderThan('1', '2.x')` returned true, so a malformed state file could make a window yield to a "newer" proxy. An unparsable recorded version now counts as the oldest. (Written by a GLM-5.3 agent task, reviewed in-task by Claude Sonnet on the login worker, and applied after the lead's review — the first change made through the extension's own agent tasks.)
+
 ## 1.12.1 — 2026-10-19
 
 ### Fixed

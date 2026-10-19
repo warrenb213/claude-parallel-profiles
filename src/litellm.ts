@@ -196,6 +196,7 @@ function olderThan(a: string | undefined, b: string): boolean {
   const pa = (a ?? '').split('.').map(Number);
   const pb = b.split('.').map(Number);
   if (!a || pa.some(isNaN)) return true;
+  if (!b || pb.some(isNaN)) return false;
   for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
     if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) < (pb[i] ?? 0);
   }
