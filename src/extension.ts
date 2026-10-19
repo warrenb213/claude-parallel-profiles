@@ -12,6 +12,7 @@ import { AccountWatcher } from './accountWatcher';
 import { HostState } from './hostState';
 import { ProviderManager } from './providers';
 import { DelegateServer } from './delegate';
+import { AgentTasks } from './agentTasks';
 import { allWorkingDirs, workingRoot } from './workdir';
 import { removeStrayLinks } from './litellm';
 import { log, showLog } from './log';
@@ -200,6 +201,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     cmd('claudeProfiles.switchProvider', () => providers.switchInteractive()),
     cmd('claudeProfiles.addProvider', () => providers.addInteractive()),
     cmd('claudeProfiles.editProvider', () => providers.editInteractive()),
+    cmd('claudeProfiles.showAgentTasks', () => agentTasks.showInteractive()),
     // Only the focused window repairs a dir whose account was replaced by a
     // sign-in (it's the window the user signed in from). So a window that was
     // unfocused while that happened must reconcile when focus comes back —
@@ -260,8 +262,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Not part of the activation race: settings.json is read by each `claude` when
   // it starts, and it already carries the provider written at the last switch.
   // Workers (delegate.ts): registered in this window's own config while any are enabled.
-  const workers = new DelegateServer(providers, () => providers.ownConfigDir());
-  context.subscriptions.push(workers);
+  const agentTasks = new AgentTasks((id) => providers.agentSpec(id));
+  const workers = new DelegateServer(providers, () => providers.ownConfigDir(), agentTasks);
+  context.subscriptions.push(workers, agentTasks);
   void providers.migrate().then(async () => {
     await providers.sync();
     await workers.reconcile();

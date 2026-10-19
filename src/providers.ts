@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { WindowBinding } from './binding';
 import type { Worker, WorkerSource } from './delegate';
+import type { AgentRunSpec } from './agentTasks';
 import { HostState } from './hostState';
 import { readIdentity } from './accounts';
 import { allWorkingDirs, workingRoot } from './workdir';
@@ -82,6 +83,8 @@ export interface Provider {
   legacyId?: string;
   /** Models of this provider the window's AI may consult as workers (see delegate.ts). Off when unset. */
   workers?: string[];
+  /** Of those, the ones that may also run agent tasks (agentTasks.ts): tools, in a worktree. */
+  agentWorkers?: string[];
 }
 
 /** Where versions up to 1.7 kept every provider: globalState, shared by every host and account. */
@@ -578,8 +581,33 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
         baseUrl: isNative(p) ? ANTHROPIC_API : p.baseUrl,
         auth: isNative(p) ? ('x-api-key' as const) : p.auth,
         note: notes.get(model) ?? `${model} on ${p.name}`,
+        agent: (p.agentWorkers ?? []).includes(model),
       }));
     });
+  }
+
+  /**
+   * How to run a worker as an agent task: the provider's settings as a window on
+   * it would get them, minus the key — which goes to the run's process only.
+   */
+  async agentSpec(workerId: string): Promise<AgentRunSpec | undefined> {
+    const w = this.workers().find((x) => x.id === workerId && x.agent);
+    const p = w && this.list().find((x) => x.id === w.providerId);
+    if (!w || !p) return undefined;
+    if (p.extraModels?.includes(w.model)) return undefined; // translated models need the proxy; not for agent tasks
+    const key = await this.keyFor(p.id);
+    if (!key) return undefined;
+    const s = settingsFor(p, key);
+    const { ANTHROPIC_AUTH_TOKEN = '', ANTHROPIC_API_KEY = '', ...env } = s.env;
+    // The provider's own name for the model (it may carry Claude Code's [1m] marker).
+    const runModel =
+      Object.values(p.models ?? {}).find((m) => m && m.replace(/(\[1m\])+$/i, '') === w.model) ?? w.model;
+    return {
+      runModel,
+      settings: { ...s.top, env },
+      secretEnv: { ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY },
+      ...(ANTHROPIC_API_KEY && { approveKeyTail: ANTHROPIC_API_KEY.trim().slice(-20) }),
+    };
   }
 
   /** WorkerSource: the provider's key, read from secret storage per call. */
@@ -1119,7 +1147,9 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
       { label: '$(pulse) Test connection', description: 'one tiny request, as Claude Code sends it', action: 'test' },
       {
         label: '$(organization) Workers',
-        description: target.workers?.length ? `${target.workers.join(', ')}` : 'off',
+        description: target.workers?.length
+          ? target.workers.map((m) => (target.agentWorkers?.includes(m) ? `${m} (+agent)` : m)).join(', ')
+          : 'off',
         detail: "Let this window's AI consult this provider's models for focused tasks (answers only)",
         action: 'workers',
       },
@@ -1218,6 +1248,37 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
           if (ok !== 'Allow') return;
         }
         updated.workers = models.length > 0 ? models : undefined;
+        // Agent tasks: a separate, stronger opt-in among the enabled workers.
+        const agentOn = new Set((target.agentWorkers ?? []).filter((m) => models.includes(m)));
+        if (models.length > 0) {
+          const agentPick = await vscode.window.showQuickPick(
+            models.map((m) => ({ label: m, picked: agentOn.has(m) })),
+            {
+              title: `${target.name}: which of these may also run AGENT TASKS?`,
+              placeHolder:
+                'Agent tasks run Claude Code on this model in a scratch git worktree, with edits and commands (auto mode). None = answers only.',
+              canPickMany: true,
+            }
+          );
+          const agents = (agentPick ?? []).map((i) => i.label);
+          const newAgents = agents.filter((m) => !agentOn.has(m));
+          if (newAgents.length > 0) {
+            const ok = await vscode.window.showWarningMessage(
+              `Let ${target.name} (${newAgents.join(', ')}) run agent tasks?\n\n` +
+                `• Claude Code runs on that model, headless, in a git worktree made from your repo (HEAD + ` +
+                `uncommitted changes). It reads and edits files there and runs commands — on this machine.\n` +
+                `• Auto mode checks each consequential action with a safety classifier on that same model ` +
+                `(about 35K tokens per check). Nothing reaches your working tree unless the lead applies the diff.\n` +
+                `• The repo content it reads goes to ${target.name}. Limits: 2 at a time, 80 turns, 30 minutes.`,
+              { modal: true },
+              'Allow agent tasks'
+            );
+            if (ok !== 'Allow agent tasks') agents.splice(0, agents.length, ...[...agentOn]);
+          }
+          updated.agentWorkers = agentPick === undefined ? [...agentOn] : agents.length > 0 ? agents : undefined;
+        } else {
+          updated.agentWorkers = undefined;
+        }
         break;
       }
       case 'test': {

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.11.0 — 2026-10-19
+
+### Added
+
+- **Agent tasks: workers that do real work.** A second opt-in under *Workers* lets chosen worker models run agent tasks. The lead gets `start_task`, `wait_task`, `cancel_task` and `apply_task_changes`: Claude Code runs headless on the worker's model, in auto mode, in a scratch git worktree made from the repo (HEAD + uncommitted changes, untracked files included, the user's index untouched), with a fresh config holding no login, plugins or MCP servers and the provider key only in its environment. It returns the worker's report and a diff; the lead reviews it and may apply it to the working tree (never staged).
+  - Command side effects (build output, caches, logs) are reported but left out of the diff; changes to existing files and files the worker wrote with its file tools are included.
+  - Limits: 2 tasks at a time, 80 turns, 30 minutes. Status bar entry and *Claude Accounts: Show Agent Tasks* (log, patch, cancel). Patches and logs kept 7 days; worktrees removed when a task ends, or when its window closes.
+  - Verified on a Z.ai Coding Plan: GLM-5.3 fixed a bug, wrote a new test file and ran the suite under auto mode (31 s, 17 turns); the applied diff held exactly the two intended files, the user's uncommitted edits and untracked files were kept, and nothing was staged.
+
 ## 1.10.0 — 2026-10-19
 
 ### Added

@@ -2,7 +2,7 @@
   "name": "claude-parallel-accounts",
   "displayName": "Claude Parallel Accounts",
   "description": "Companion for the Claude Code VS Code extension: run a different Claude account in each VSCode window simultaneously — capture, switch, and isolate accounts per window.",
-  "version": "1.10.0",
+  "version": "1.11.0",
   "publisher": "DercasDrol",
   "icon": "images/icon.png",
   "repository": {
@@ -89,6 +89,11 @@
         "command": "claudeProfiles.editProvider",
         "title": "Edit or Remove a Provider",
         "category": "Claude Accounts"
+      },
+      {
+        "category": "Claude Accounts",
+        "command": "claudeProfiles.showAgentTasks",
+        "title": "Show Agent Tasks"
       }
     ]
   },

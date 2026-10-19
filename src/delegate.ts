@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as http from 'http';
 import * as crypto from 'crypto';
 import { log } from './log';
+import type { AgentTasks } from './agentTasks';
 
 /**
  * Workers: other models the window's AI can consult — "Claude leads, others help".
@@ -34,6 +35,8 @@ export interface Worker {
   auth: 'bearer' | 'x-api-key';
   /** One line for the lead: what this worker is good for. */
   note: string;
+  /** Also enabled for agent tasks (agentTasks.ts): runs in a worktree with tools. */
+  agent?: boolean;
 }
 
 export interface WorkerSource {
@@ -108,7 +111,8 @@ export class DelegateServer implements vscode.Disposable {
   /** `configDir`: this window's CLAUDE_CONFIG_DIR (its own working dir), or undefined when unbound. */
   constructor(
     private readonly source: WorkerSource,
-    private readonly configDir: () => string | undefined
+    private readonly configDir: () => string | undefined,
+    private readonly agents?: AgentTasks
   ) {
     this.subscription = source.onDidChange.event(() => void this.reconcile());
   }
@@ -177,8 +181,9 @@ export class DelegateServer implements vscode.Disposable {
           capabilities: { tools: {} },
           serverInfo: { name: SERVER_NAME, version: '1' },
           instructions:
-            'Other AI models (workers) the user enabled for consultation. Use them for second opinions, ' +
-            'reviews, drafts and bulk text work; check their answers before relying on them.',
+            'Other AI models (workers) the user enabled. `delegate` asks one a question (answers only). ' +
+            'Where enabled, start_task runs one as an agent on a scratch worktree of the repo and returns a ' +
+            'diff via wait_task; review it before apply_task_changes. Check workers\' output before relying on it.',
         });
       case 'ping':
         return reply({});
@@ -223,6 +228,52 @@ export class DelegateServer implements vscode.Disposable {
           required: ['worker', 'task'],
         },
       },
+      ...this.agentTools(),
+    ];
+  }
+
+  private agentTools(): Json[] {
+    const ids = this.source.workers().filter((w) => w.agent).map((w) => w.id);
+    if (!this.agents || ids.length === 0) return [];
+    const id = { type: 'string', description: 'The task_id start_task returned.' };
+    return [
+      {
+        name: 'start_task',
+        description:
+          'Start an agent task: a worker model (another provider the user enabled) runs Claude Code headless on a ' +
+          "scratch git worktree of this repo — HEAD plus the user's uncommitted changes — with auto-mode tool use " +
+          '(edits, commands checked by a safety classifier). Returns a task_id at once; tasks take minutes. ' +
+          'The worker sees only the repo and what you put in task/context. Get the result with wait_task.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            worker: { type: 'string', enum: ids },
+            task: { type: 'string', description: 'The job, stated completely, with how to verify it.' },
+            context: { type: 'string', description: 'Anything it needs beyond the repo itself.' },
+          },
+          required: ['worker', 'task'],
+        },
+      },
+      {
+        name: 'wait_task',
+        description: "Wait for an agent task (up to `seconds`), then return its status — or, when done, the worker's report and the diff of its changes.",
+        inputSchema: {
+          type: 'object',
+          properties: { task_id: id, seconds: { type: 'integer', minimum: 1, maximum: 600, description: 'How long to wait (default 120).' } },
+          required: ['task_id'],
+        },
+      },
+      {
+        name: 'cancel_task',
+        description: 'Stop a running agent task (its changes so far are still collected).',
+        inputSchema: { type: 'object', properties: { task_id: id }, required: ['task_id'] },
+      },
+      {
+        name: 'apply_task_changes',
+        description:
+          "Apply a finished task's diff to the user's working tree (unstaged). Only after you reviewed the diff from wait_task.",
+        inputSchema: { type: 'object', properties: { task_id: id }, required: ['task_id'] },
+      },
     ];
   }
 
@@ -231,6 +282,30 @@ export class DelegateServer implements vscode.Disposable {
     if (name === 'list_workers') {
       const ws = this.source.workers();
       return text(ws.map((w) => `- ${w.id}: ${w.note} (${w.providerName}, model ${w.model})`).join('\n') || 'No workers are enabled.');
+    }
+    if (this.agents && ['start_task', 'wait_task', 'cancel_task', 'apply_task_changes'].includes(name)) {
+      try {
+        const id = String(args.task_id ?? '');
+        if (name === 'start_task') {
+          const w = this.source.workers().find((x) => x.id === args.worker && x.agent);
+          if (!w) return text(`No worker "${String(args.worker)}" enabled for agent tasks.`, true);
+          const task = typeof args.task === 'string' ? args.task.trim() : '';
+          if (!task) return text('`task` is required.', true);
+          const context = typeof args.context === 'string' ? args.context : undefined;
+          if (task.length + (context?.length ?? 0) > MAX_CONTEXT_CHARS) return text(`Too much to send (limit ${MAX_CONTEXT_CHARS} characters).`, true);
+          const taskId = await this.agents.start(w.id, task, context);
+          return text(`Started task ${taskId} on ${w.id}. Call wait_task with task_id "${taskId}" for its result.`);
+        }
+        if (name === 'wait_task') {
+          const r = await this.agents.wait(id, Number(args.seconds) || 120);
+          return text(r.text, r.isError);
+        }
+        if (name === 'cancel_task') return text(this.agents.cancel(id));
+        const r = await this.agents.apply(id);
+        return text(r.text, r.isError);
+      } catch (err) {
+        return text((err as Error).message, true);
+      }
     }
     if (name !== 'delegate') return text(`Unknown tool ${name}.`, true);
     const w = this.source.workers().find((x) => x.id === args.worker);
