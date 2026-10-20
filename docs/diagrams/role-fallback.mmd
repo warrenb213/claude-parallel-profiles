@@ -1,0 +1,8 @@
+flowchart LR
+  L["Lead: delegate(role: review)"] --> R{"Role chain<br/>(your order)"}
+  R --> C1{"1st entry: enabled,<br/>can run, plan under<br/>its threshold?"}
+  C1 -- "yes" --> Call1["Call it at the entry's effort"]
+  C1 -- "no: passed over<br/>(to the back if only over threshold)" --> C2{"next entry"}
+  Call1 -- "answer" --> Back["Answer, with who served it<br/>and what was passed over"]
+  Call1 -- "429, used-up plan, sign-in,<br/>outage, timeout" --> C2
+  C2 --> Call2["Call it"] --> Back

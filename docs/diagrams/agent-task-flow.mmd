@@ -1,0 +1,24 @@
+sequenceDiagram
+  autonumber
+  participant L as Lead
+  participant T as Agent tasks
+  participant G as git
+  participant R as Worker run (Claude Code or Codex)
+  L->>T: start_task(worker, task, context, include?, minutes?, after?)
+  T->>G: snapshot HEAD + uncommitted changes<br/>(temporary index, within budgets)
+  T->>G: worktree add (LFS files stay pointers)
+  T->>T: link node_modules, .venv … · fresh config · key in env only
+  T-->>L: task_id
+  T->>R: start (auto mode, or Codex's sandbox), told its limits
+  loop while it works
+    R->>R: edit files · run builds and tests
+    R-->>T: messages and tool calls (live transcript)
+    L->>T: wait_task(task_id), up to 240 s a call
+    T-->>L: still running: turns, last action
+  end
+  R-->>T: report, exit — or stopped at a limit
+  T->>G: collect changes as a patch and a result commit · remove the worktree
+  L->>T: wait_task(task_id)
+  T-->>L: report + diff
+  L->>T: apply_task_changes(task_id), after review
+  T->>G: git apply --check, then apply to the working tree (unstaged)

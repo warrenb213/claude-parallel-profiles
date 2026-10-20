@@ -1,0 +1,10 @@
+sequenceDiagram
+  participant L as Lead (Claude Code)
+  participant M as Workers MCP server
+  participant W as Worker (e.g. GLM on Z.ai)
+  L->>M: delegate(worker, task, context)
+  M->>M: check limits · read the key from secret storage
+  M->>W: one Messages API request<br/>(login worker: headless claude -p · Codex: codex exec)
+  W-->>M: answer (+ tokens, plan usage)
+  M-->>L: answer — the lead checks it before relying on it
+  Note over M: kept for the transcripts and the usage book

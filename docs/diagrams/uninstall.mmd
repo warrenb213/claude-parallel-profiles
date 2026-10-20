@@ -1,0 +1,10 @@
+flowchart LR
+  start["VS Code runs the uninstall hook"] --> other{"Another copy of the extension<br/>installed, or can't tell?"}
+  other -- "yes" --> stop0["Do nothing"]
+  other -- "no" --> proxies["Stop LiteLLM proxies"]
+  proxies --> acct["~/.claude: sign in as the account<br/>with the newest token"]
+  acct --> hist["Move the shared history into ~/.claude<br/>and fold in what any account kept to itself"]
+  hist --> ok{"Everything moved?"}
+  ok -- "no" --> keep["Wipe stray tokens,<br/>keep its folders so no history is lost"]
+  ok -- "yes" --> rm["Delete the account stores it created,<br/>~/.claude-windows (working copies, state,<br/>proxy, agent tasks) and ~/.claude-shared"]
+  rm --> adopted["Adopted stores: keep their login and files,<br/>remove only its history links"]

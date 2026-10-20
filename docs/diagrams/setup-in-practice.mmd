@@ -1,0 +1,19 @@
+sequenceDiagram
+  participant You
+  participant L as Claude (lead, on Max)
+  participant X as CPPO
+  participant G as GLM (Z.ai plan)
+  participant C as Codex (ChatGPT plan)
+  You->>L: "Add a dash ability to the player, with an icon"
+  L->>X: start_task(role: implement)
+  X->>G: Claude Code on GLM, in a worktree
+  L->>X: start_task(role: 2d-art, "a dash icon, 64×64, transparent")
+  X->>C: Codex with image generation, in a worktree
+  G-->>X: report + diff
+  C-->>X: report + icon file
+  L->>X: delegate(role: review, the diff)
+  Note over X: Codex at 96% of its 5-hour window:<br/>passed over, next in the chain
+  X->>G: review on GLM instead
+  G-->>L: review (served by GLM — Codex passed over, and why)
+  L->>X: apply_task_changes (after reading both diffs)
+  L-->>You: what changed, what was reviewed, by whom

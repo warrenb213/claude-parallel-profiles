@@ -1,0 +1,33 @@
+flowchart LR
+  subgraph win["VS Code window"]
+    direction TB
+    cppo["CPPO"]
+    cc["Claude Code<br/>(the lead)"]
+    mcp["Workers MCP server<br/>roles · fallbacks · usage"]
+    tasks["Agent tasks<br/>(scratch git worktrees)"]
+  end
+  subgraph disk["Your home directory"]
+    direction TB
+    stores[("Account stores<br/>~/.claude-work …")]
+    wd[("This window's Claude Code dir<br/>account · provider · MCP entry")]
+    shared[("One shared history<br/>~/.claude-shared")]
+  end
+  subgraph svc["Services you use"]
+    direction TB
+    anth["Anthropic<br/>(your login or API key)"]
+    gw["Z.ai · Poe · gateways<br/>(LiteLLM proxy for non-Claude)"]
+    oai["OpenAI<br/>(through the Codex CLI)"]
+  end
+  cppo -- "CLAUDE_CONFIG_DIR" --> cc
+  cppo -- "writes" --> wd
+  stores -- "copied in" --> wd
+  wd -- "linked" --> shared
+  cc -- "chat" --> anth
+  cc -. "or chat via a gateway" .-> gw
+  cc -- "delegate · start_task<br/>by role" --> mcp
+  mcp --> tasks
+  mcp -- "answers" --> anth
+  mcp -- "answers" --> gw
+  mcp -- "answers" --> oai
+  tasks -- "headless runs" --> gw
+  tasks -- "headless runs" --> oai

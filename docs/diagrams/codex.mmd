@@ -1,0 +1,12 @@
+flowchart LR
+  subgraph ext["CPPO"]
+    M["Workers MCP server"]
+    T["Agent tasks"]
+  end
+  M -- "delegate" --> E1["codex exec --json<br/>read-only, empty folder,<br/>shell and other tools off"]
+  T -- "start_task" --> E2["codex exec --json --approve-for-me<br/>in the worktree: writes only there,<br/>no network for commands"]
+  M -- "provider_usage" --> A["codex app-server<br/>account/rateLimits/read"]
+  E2 -- "delegate (worker token)" --> M
+  E1 --> O["OpenAI"]
+  E2 --> O
+  A --> O

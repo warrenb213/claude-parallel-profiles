@@ -1,0 +1,12 @@
+sequenceDiagram
+  participant VS as VS Code (window start)
+  participant X as CPPO
+  participant CC as Claude Code extension
+  VS->>X: activate ("*": before anything else)
+  X->>X: Linux? else inert
+  X->>X: resolve this window's account<br/>(window → this folder's last → last used)
+  X->>X: copy the store into ~/.claude-windows/HASH if needed<br/>set CLAUDE_CONFIG_DIR + terminal env (synchronously)
+  VS->>CC: activate — reads CLAUDE_CONFIG_DIR once
+  X->>X: strip machine-wide overrides · discover accounts · link history
+  X->>X: reconcile: new sign-in? signed out? mirror into ~/.claude
+  X->>X: status bar · watcher · providers, workers, agent tasks (in the background)

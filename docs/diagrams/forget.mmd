@@ -1,0 +1,5 @@
+flowchart LR
+  F["Forget account"] --> L["Remove it from the list<br/>(its folders stay on disk)"]
+  L --> K["Stop Claude sessions<br/>running on it"]
+  K --> S["Delete its OAuth token from every copy<br/>~/.claude, account stores, window copies"]
+  S --> R["This window, if it used it: reload<br/>Other windows notice and reload,<br/>then offer another account"]

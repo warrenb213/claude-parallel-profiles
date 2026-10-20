@@ -70,27 +70,7 @@ One person, three subscriptions — **Claude Max** (Anthropic login), **Z.ai GLM
 
 Then, in any chat:
 
-```mermaid
-sequenceDiagram
-  participant You
-  participant L as Claude (lead, on Max)
-  participant X as This extension
-  participant G as GLM (Z.ai plan)
-  participant C as Codex (ChatGPT plan)
-  You->>L: "Add a dash ability to the player, with an icon"
-  L->>X: start_task(role: implement)
-  X->>G: Claude Code on GLM, in a worktree
-  L->>X: start_task(role: 2d-art, "a dash icon, 64×64, transparent")
-  X->>C: Codex with image generation, in a worktree
-  G-->>X: report + diff
-  C-->>X: report + icon file
-  L->>X: delegate(role: review, the diff)
-  Note over X: Codex at 96% of its 5-hour window:<br/>passed over, next in the chain
-  X->>G: review on GLM instead
-  G-->>L: review (served by GLM — Codex passed over, and why)
-  L->>X: apply_task_changes (after reading both diffs)
-  L-->>You: what changed, what was reviewed, by whom
-```
+![A request flowing from you to Claude, out to GLM and Codex by role, with a review falling back from Codex to GLM](docs/diagrams/setup-in-practice.png)
 
 Everything stays visible: the account's hover shows active tasks and links to each one's transcript; the orchestration panel shows what each plan has left and who would serve each role right now.
 
@@ -100,47 +80,7 @@ Everything stays visible: the account's hover shows active tasks and links to ea
 
 Every VS Code window runs its own extension host, so its environment is its own. This extension activates first and points that window's Claude Code at a private data directory (`CLAUDE_CONFIG_DIR`), which holds the window's account and provider settings. Everything else hangs off that.
 
-```mermaid
-flowchart TB
-  subgraph win["VS Code window (its own extension host)"]
-    ext["CPPO"]
-    cc["Claude Code extension<br/>(chat sessions)"]
-    term["Integrated terminals"]
-    mcp["Workers MCP server<br/>127.0.0.1"]
-    roles["Roles · fallbacks<br/>(orchestration)"]
-    tasks["Agent tasks"]
-    ext --- mcp
-    ext --- tasks
-    mcp --- roles
-  end
-
-  subgraph host["This host — your home directory"]
-    stores[("Account stores<br/>~/.claude-work, ~/.claude-personal")]
-    wd[("Window working copy<br/>~/.claude-windows/a1b2c3d4e5f6<br/>token · identity · settings.json · .claude.json")]
-    shared[("Shared history<br/>~/.claude-shared")]
-    def[("~/.claude<br/>mirror of the last account")]
-    wt[("Agent task worktrees<br/>~/.claude-windows/agent-tasks")]
-    proxy["LiteLLM proxy<br/>127.0.0.1 (opt-in)"]
-  end
-
-  ext -- "CLAUDE_CONFIG_DIR, set before Claude Code activates" --> cc
-  ext -- "same env" --> term
-  stores -- "copied in on bind" --> wd
-  wd -- "symlinks" --> shared
-  ext -- "kept in sync" --> def
-  cc -- "reads its account, provider<br/>and MCP servers from" --> wd
-  cc -- "lead tools" --> mcp
-  tasks -- "headless Claude Code runs" --> wt
-
-  cc -- "Anthropic login / API key" --> anth["Anthropic"]
-  cc -- "gateway" --> gw["Gateway: Z.ai · Poe · custom"]
-  cc -- "non-Claude models" --> proxy --> gw
-  mcp -- "delegate" --> gw
-  mcp -- "delegate (login worker)" --> anth
-  mcp -- "delegate · usage" --> codex["Codex CLI<br/>(ChatGPT plan or API key)"]
-  tasks -- "Codex runs" --> codex
-  codex --> openai["OpenAI"]
-```
+![CPPO points the window's Claude Code at its own directory; Claude Code chats with Anthropic or a gateway and hands work by role to the workers MCP server, which reaches Anthropic, gateways and OpenAI](docs/diagrams/architecture.png)
 
 | Part | Source | What it does |
 | --- | --- | --- |
@@ -203,20 +143,7 @@ CPPO replaces Claude Parallel Accounts (`DercasDrol.claude-parallel-accounts` �
 
 **Signing in as another account inside a window** (Claude Code's account menu, or `/login`) replaces only *that window's* account. The extension saves the new account, keeps the old one, and reloads the window so Claude Code actually switches; other windows are untouched.
 
-```mermaid
-sequenceDiagram
-  participant U as You
-  participant CC as Claude Code (window A)
-  participant WD as Window A's working copy
-  participant X as This extension
-  U->>CC: /login as another account
-  CC->>WD: writes the new token and identity
-  X->>WD: notices (polls every 2 s)
-  X->>X: new email? save it as ~/.claude-name<br/>known email? refresh its store
-  X->>X: bind window A to it · remember it for this folder<br/>mirror it into ~/.claude
-  X->>CC: reload window A ("Signed in as …")
-  Note over X: automatic reloads: at most one a minute,<br/>else a button — never a reload loop
-```
+![Signing in as another account inside a window: Claude Code writes the token, CPPO notices, saves the account, binds the window and reloads it](docs/diagrams/sign-in.png)
 
 **Reopening a project** restores the account that folder used last (the tooltip says so).
 
@@ -224,13 +151,7 @@ sequenceDiagram
 
 **Forgetting** (hover → *Forget…*) asks first, then:
 
-```mermaid
-flowchart LR
-  F["Forget account"] --> L["Remove it from the list<br/>(its folders stay on disk)"]
-  L --> K["Stop Claude sessions<br/>running on it"]
-  K --> S["Delete its OAuth token from every copy<br/>~/.claude, account stores, window copies"]
-  S --> R["This window, if it used it: reload<br/>Other windows notice and reload,<br/>then offer another account"]
-```
+![Forgetting an account: removed from the list, its sessions stopped, its token deleted everywhere, windows reloaded](docs/diagrams/forget.png)
 
 History, settings and the folders stay; signing in again brings the account back.
 
@@ -242,13 +163,7 @@ History, settings and the folders stay; signing in again brings the account back
 
 Claude Code keeps its history per *data directory*, and plain Claude Code has only one. This extension gives each window a directory of its own, so it puts the history back together in one store, `~/.claude-shared`, linked from every directory:
 
-```mermaid
-flowchart LR
-  a["~/.claude/projects"] --> s
-  b["~/.claude-work/projects"] --> s
-  c["~/.claude-windows/a1b2c3d4e5f6/projects"] --> s
-  s[("~/.claude-shared/projects<br/>per repository")]
-```
+![Every Claude Code data directory links its projects folder to one shared history store](docs/diagrams/shared-history.png)
 
 - Linked: `projects`, `sessions`, `session-env`, `shell-snapshots`, `file-history`, `plans`, `todos` and `history.jsonl`. **Credentials and identity never are** — those stay strictly per account.
 - Existing history is merged in when a directory is first linked: identical files once, otherwise the newer wins and the older is kept in `~/.claude-shared/.merge-backup`; `history.jsonl` lines are combined.
@@ -268,19 +183,7 @@ A window's **provider** decides where its requests go and who pays, without chan
 | **Anthropic API key** | A key from [console.anthropic.com](https://console.anthropic.com), billed per token, without signing the account in with it. | Claude Code → `api.anthropic.com` with that key. The extension pre-approves the key, so Claude Code's "Detected a custom API key" prompt (whose default, *No*, would silently fall back to the login) never appears. |
 | **Gateway** | An Anthropic-compatible endpoint with a key. Presets: **Z.ai GLM Coding Plan** and **Poe**; **Custom** for anything else (`Authorization: Bearer` or `x-api-key`). | Claude Code → the gateway. Non-Claude models on gateways that only speak OpenAI's format go through a local LiteLLM proxy. |
 
-```mermaid
-flowchart LR
-  CC["Claude Code<br/>(this window)"]
-  P["LiteLLM proxy<br/>127.0.0.1, its own key<br/>(opt-in, per provider)"]
-  A["Anthropic<br/>account login"]
-  K["api.anthropic.com<br/>with an API key"]
-  G["Gateway<br/>Z.ai · Poe · custom"]
-  CC -- "Anthropic" --> A
-  CC -- "Anthropic API key" --> K
-  CC -- "Gateway: Claude models,<br/>or Anthropic-compatible ones" --> G
-  CC -- "Gateway: non-Claude models<br/>(OpenAI format only)" --> P
-  P -- "translated both ways;<br/>Claude models pass through" --> G
-```
+![Where a window's requests go for each provider kind: Anthropic, an API key, a gateway, or non-Claude models through the local proxy](docs/diagrams/provider-routing.png)
 
 **Switching** (hover → *Switch provider*, or *CPPO: Switch Provider for This Window*) writes the provider's settings into the window's own `settings.json` and reloads the window; terminals follow it. **To go back to Anthropic from anything else, pick *Anthropic*** — the settings the provider took over are restored as they were.
 
@@ -320,26 +223,7 @@ The window's Claude (the **lead**) can hand work to other models you've set up �
 | What comes back | an answer | a report and a diff, applied only by the lead |
 | The lead's tools | `list_workers`, `delegate`, `provider_usage` | `start_task`, `wait_task`, `cancel_task`, `apply_task_changes` |
 
-```mermaid
-flowchart TB
-  subgraph win["VS Code window"]
-    Lead["Claude Code session<br/>(the lead)"]
-    subgraph ext["This extension"]
-      MCP["Workers MCP server<br/>127.0.0.1 · random tokens"]
-      Tasks["Agent tasks"]
-      Keys[("VS Code secret storage<br/>provider keys")]
-    end
-  end
-  Lead -- "lead token: every tool" --> MCP
-  MCP -- "delegate" --> API["Gateway worker<br/>e.g. GLM on Z.ai"]
-  MCP -- "delegate" --> Login["Login worker<br/>headless claude -p, no tools,<br/>on the account's own directory"]
-  MCP -- "delegate" --> Codex["Codex worker<br/>headless codex exec, read-only,<br/>tools off, ChatGPT plan or API key"]
-  MCP -- "start / wait / cancel / apply" --> Tasks
-  Tasks -- "spawns" --> Run["Headless run in a git worktree:<br/>Claude Code in auto mode,<br/>or Codex in its sandbox"]
-  Run -- "worker token: delegate,<br/>list_workers, provider_usage" --> MCP
-  Keys -. "read per call" .-> MCP
-  Keys -. "process env only" .-> Run
-```
+![The lead calls the workers MCP server, which serves delegate calls on gateways, the login and Codex, and starts agent tasks that can consult back](docs/diagrams/workers.png)
 
 **How it's served.** A small MCP server inside the extension, on `127.0.0.1`, registered in the window's own Claude Code config (`.claude.json`) while some worker is enabled, and removed when none is or the window closes. Open sessions are told when workers change (`tools/list_changed`) and pick up the new tools without restarting. Each call reads the provider's key from VS Code's secret storage; the window's own provider is untouched.
 
@@ -358,16 +242,7 @@ Instead of picking a model each time, the lead asks for a **role** — `delegate
 | Art | `2d-art` | `start_task` | raster images (sprites, textures, concept art) from Codex's image generation, saved as files |
 | | `vector-art` | `start_task` | SVG icons, diagrams, simple vector art |
 
-```mermaid
-flowchart LR
-  L["Lead: delegate(role: review)"] --> R{"Role chain<br/>(your order)"}
-  R --> C1{"1st entry: enabled,<br/>can run, plan under<br/>its threshold?"}
-  C1 -- "yes" --> Call1["Call it at the entry's effort"]
-  C1 -- "no: passed over<br/>(to the back if only over threshold)" --> C2{"next entry"}
-  Call1 -- "answer" --> Back["Answer, with who served it<br/>and what was passed over"]
-  Call1 -- "429, used-up plan, sign-in,<br/>outage, timeout" --> C2
-  C2 --> Call2["Call it"] --> Back
-```
+![A role call walks its chain: an entry that can't run or is over its threshold is passed over; a failed call moves to the next entry](docs/diagrams/role-fallback.png)
 
 - **Chains.** Each role has an ordered list of worker models, each with an **effort** (low → max: Claude Code's `--effort`, Codex's reasoning effort within what the model takes, a thinking budget on Messages-API workers). Until you save your own, a **template** builds them from your workers, subscriptions first — e.g. implement on GLM's Coding Plan, review and second opinions on Codex, hard reasoning on Opus on your login, 2D art on Codex.
 - **Thresholds.** An entry whose plan has used more than 95% of a 5-hour window or 90% of a weekly one (yours to change) is passed over to the back of the chain; when every entry is past its threshold, the least-used still serves. Usage comes from Codex and Z.ai (read when older than five minutes) and, for the Anthropic login, from the usage report Claude Code itself caches as you work (what `/usage` shows) — read from the file, never fetched with your token.
@@ -380,18 +255,7 @@ flowchart LR
 
 ### `delegate`: answers only
 
-```mermaid
-sequenceDiagram
-  participant L as Lead (Claude Code)
-  participant M as Workers MCP server
-  participant W as Worker (e.g. GLM on Z.ai)
-  L->>M: delegate(worker, task, context)
-  M->>M: check limits · read the key from secret storage
-  M->>W: one Messages API request<br/>(login worker: headless claude -p · Codex: codex exec)
-  W-->>M: answer (+ tokens, plan usage)
-  M-->>L: answer — the lead checks it before relying on it
-  Note over M: kept for the transcripts and the usage book
-```
+![A delegate call: the server checks limits, reads the key, makes one request to the worker and returns the answer](docs/diagrams/delegate.png)
 
 - The worker gets the task and what the lead pastes in — nothing else. It can't read files, run commands or change anything.
 - At most 120,000 characters sent and 8,192 tokens back per call, and 100 calls per window session. GLM gets extra room for its thinking, and is asked again without thinking if that used the whole budget.
@@ -402,45 +266,9 @@ sequenceDiagram
 
 A worker enabled for agent tasks runs **Claude Code headless on its own model** (e.g. GLM-5.3 on Z.ai), in **auto mode** — or, for a Codex worker, **Codex itself** in its sandbox — inside a scratch **git worktree** of your repo. It edits files and runs builds and tests there; nothing reaches your working tree unless the lead reviews the diff and applies it.
 
-```mermaid
-sequenceDiagram
-  autonumber
-  participant L as Lead
-  participant T as Agent tasks
-  participant G as git
-  participant R as Worker run (Claude Code or Codex)
-  L->>T: start_task(worker, task, context, include?, minutes?, after?)
-  T->>G: snapshot HEAD + uncommitted changes<br/>(temporary index, within budgets)
-  T->>G: worktree add (LFS files stay pointers)
-  T->>T: link node_modules, .venv … · fresh config · key in env only
-  T-->>L: task_id
-  T->>R: start (auto mode, or Codex's sandbox), told its limits
-  loop while it works
-    R->>R: edit files · run builds and tests
-    R-->>T: messages and tool calls (live transcript)
-    L->>T: wait_task(task_id), up to 240 s a call
-    T-->>L: still running: turns, last action
-  end
-  R-->>T: report, exit — or stopped at a limit
-  T->>G: collect changes as a patch and a result commit · remove the worktree
-  L->>T: wait_task(task_id)
-  T-->>L: report + diff
-  L->>T: apply_task_changes(task_id), after review
-  T->>G: git apply --check, then apply to the working tree (unstaged)
-```
+![An agent task from start_task to apply: snapshot, worktree, headless run, collected diff, review, apply](docs/diagrams/agent-task-flow.png)
 
-```mermaid
-stateDiagram-v2
-  direction LR
-  [*] --> queued: start_task
-  queued --> running: slot free, predecessor ended
-  queued --> cancelled: cancel_task
-  running --> done: worker reported
-  running --> stopped: limit reached or cancel_task
-  running --> failed: nothing collected
-  done --> applied: apply_task_changes
-  stopped --> applied: apply_task_changes
-```
+![Agent task states: queued, running, done, stopped, failed, cancelled, applied](docs/diagrams/agent-task-states.png)
 
 *Stopped* shows as `failed` or `cancelled` with its changes kept. A done or stopped task can also be continued: `start_task(after: id)` queues a new task that starts from its changes.
 
@@ -467,20 +295,7 @@ The account's hover card lists the workers and the recent tasks: worker, progres
 
 *Add a Provider → OpenAI Codex* adds GPT models (e.g. `gpt-6.1-sol`, `gpt-6-astra`, `gpt-6-luna` — whatever Codex lists for your account) as workers. Everything runs through the **Codex CLI itself**: the OpenAI extension's bundled `codex`, or `codex` on PATH.
 
-```mermaid
-flowchart LR
-  subgraph ext["This extension"]
-    M["Workers MCP server"]
-    T["Agent tasks"]
-  end
-  M -- "delegate" --> E1["codex exec --json<br/>read-only, empty folder,<br/>shell and other tools off"]
-  T -- "start_task" --> E2["codex exec --json --approve-for-me<br/>in the worktree: writes only there,<br/>no network for commands"]
-  M -- "provider_usage" --> A["codex app-server<br/>account/rateLimits/read"]
-  E2 -- "delegate (worker token)" --> M
-  E1 --> O["OpenAI"]
-  E2 --> O
-  A --> O
-```
+![Codex as a worker: read-only consultations, agent tasks in the worktree, plan usage from codex app-server](docs/diagrams/codex.png)
 
 - **Signing in.** *ChatGPT plan* (the default) uses Codex's own sign-in on this host (`~/.codex`); the extension never reads or sends its tokens. If Codex isn't signed in, adding the provider offers *Sign in to Codex*, which opens a terminal running `codex login` (`--device-auth` in a remote window, where the browser is on another machine). *OpenAI API key* is billed per token: the key stays in VS Code's secret storage and reaches each run as `CODEX_API_KEY`, with a Codex home of its own (`~/.claude-windows/codex/<id>`), so it never touches your own Codex sign-in or config.
 - **Consultations** run `codex exec` read-only, in an empty temporary folder, with the shell and other tools off and your Codex config and rules not loaded — the task and the lead's material, nothing else.
@@ -492,11 +307,7 @@ flowchart LR
 
 An API-key Codex provider can also bill a whole chat window: *Edit or Remove a Provider → Codex → Chat-window models* (or *Set up chat windows* when adding it, or picking it under *Switch provider*) chooses which GPT models appear in Claude Code's model picker and which one is the default.
 
-```mermaid
-flowchart LR
-  CC["Claude Code<br/>(this window)"] -- "Anthropic Messages API,<br/>proxy key" --> P["LiteLLM proxy<br/>127.0.0.1"]
-  P -- "OpenAI API, your API key<br/>(in the proxy's memory only)" --> O["api.openai.com"]
-```
+![GPT in a chat window: Claude Code talks to the local LiteLLM proxy, which calls OpenAI with your API key](docs/diagrams/gpt-chat-window.png)
 
 - Claude Code's model slots get GPT models — sonnet (its default) your pick, opus and haiku the closest enabled match (e.g. `gpt-6-astra`, `gpt-6-luna`); haiku also runs Claude Code's titles and summaries. Only the enabled models are allowed, so a Claude model saved earlier falls back to one of them.
 - Same proxy as for non-Claude gateway models: hash-pinned LiteLLM, `127.0.0.1` only, the key in its memory, stopped when the models are turned off or the provider removed.
@@ -574,18 +385,7 @@ Removing the extension leaves Claude Code **signed in and working**, with your w
 
 When the uninstall script runs, it has a 4-second deadline (VS Code kills it at 5):
 
-```mermaid
-flowchart TB
-  start["VS Code runs the uninstall hook"] --> other{"Another copy of the extension<br/>installed, or can't tell?"}
-  other -- "yes" --> stop0["Do nothing"]
-  other -- "no" --> proxies["Stop LiteLLM proxies"]
-  proxies --> acct["~/.claude: sign in as the account<br/>with the newest token"]
-  acct --> hist["Move the shared history into ~/.claude<br/>and fold in what any account kept to itself"]
-  hist --> ok{"Everything moved?"}
-  ok -- "no" --> keep["Wipe stray tokens,<br/>keep its folders so no history is lost"]
-  ok -- "yes" --> rm["Delete the account stores it created,<br/>~/.claude-windows (working copies, state,<br/>proxy, agent tasks) and ~/.claude-shared"]
-  rm --> adopted["Adopted stores: keep their login and files,<br/>remove only its history links"]
-```
+![Uninstall steps: do nothing if another copy is installed; otherwise stop proxies, hand back the account, move the history, then delete only what CPPO created](docs/diagrams/uninstall.png)
 
 - Moving the history is a rename — instant, whatever its size.
 - Your other accounts are signed out afterwards: plain Claude Code holds one account at a time.
@@ -611,20 +411,7 @@ flowchart TB
 
 Claude Code resolves its data directory from the `CLAUDE_CONFIG_DIR` environment variable, and every VS Code window runs its own extension host, so `process.env` is per window — that's the isolation. Each **account** is a store (`~/.claude-<name>`); each **window** runs on a private working copy of the account it picked.
 
-```mermaid
-sequenceDiagram
-  participant VS as VS Code (window start)
-  participant X as This extension
-  participant CC as Claude Code extension
-  VS->>X: activate ("*": before anything else)
-  X->>X: Linux? else inert
-  X->>X: resolve this window's account<br/>(window → this folder's last → last used)
-  X->>X: copy the store into ~/.claude-windows/HASH if needed<br/>set CLAUDE_CONFIG_DIR + terminal env (synchronously)
-  VS->>CC: activate — reads CLAUDE_CONFIG_DIR once
-  X->>X: strip machine-wide overrides · discover accounts · link history
-  X->>X: reconcile: new sign-in? signed out? mirror into ~/.claude
-  X->>X: status bar · watcher · providers, workers, agent tasks (in the background)
-```
+![Window start-up: CPPO activates first, sets CLAUDE_CONFIG_DIR, then Claude Code activates and reads it](docs/diagrams/window-startup.png)
 
 The details that make it reliable — each one a bug found and fixed:
 
@@ -647,7 +434,10 @@ npm ci            # install
 npm run watch     # dev build with watch
 npm run compile   # typecheck + build
 npm run package   # build the .vsix (production bundle)
+scripts/render-diagrams.sh   # README diagrams: docs/diagrams/*.mmd → .png
 ```
+
+The README's diagrams are PNGs rendered from the Mermaid sources in `docs/diagrams/` — VS Code's extension page doesn't render Mermaid, and the packager refuses SVG images. Edit the `.mmd`, then run the script.
 
 **Releases** are [GitHub Releases](https://github.com/warrenb213/cppo/releases): a `v<version>` tag with `cppo-<version>.vsix` (built by `npm run package`) attached, and the version's `CHANGELOG.md` entry as its notes. They're made by hand — `gh release create v<version> cppo-<version>.vsix --notes-file …` — and installed by hand ([Install](#install)). CPPO is **never published to the Marketplace or Open VSX**: GitHub Actions are disabled on the repository, and the publish steps in the workflow files inherited from the original project ([`ci.yml`](.github/workflows/ci.yml), [`release.yml`](.github/workflows/release.yml)) only run in that project's repository.
 

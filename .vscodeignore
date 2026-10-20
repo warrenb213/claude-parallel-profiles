@@ -12,3 +12,5 @@ images/icon.svg
 .markdownlint.json
 .claude/
 *.vsix
+docs/
+scripts/

@@ -1,0 +1,18 @@
+flowchart TB
+  subgraph win["VS Code window"]
+    Lead["Claude Code session<br/>(the lead)"]
+    subgraph ext["CPPO"]
+      MCP["Workers MCP server<br/>127.0.0.1 · random tokens"]
+      Tasks["Agent tasks"]
+      Keys[("VS Code secret storage<br/>provider keys")]
+    end
+  end
+  Lead -- "lead token: every tool" --> MCP
+  MCP -- "delegate" --> API["Gateway worker<br/>e.g. GLM on Z.ai"]
+  MCP -- "delegate" --> Login["Login worker<br/>headless claude -p, no tools,<br/>on the account's own directory"]
+  MCP -- "delegate" --> Codex["Codex worker<br/>headless codex exec, read-only,<br/>tools off, ChatGPT plan or API key"]
+  MCP -- "start / wait / cancel / apply" --> Tasks
+  Tasks -- "spawns" --> Run["Headless run in a git worktree:<br/>Claude Code in auto mode,<br/>or Codex in its sandbox"]
+  Run -- "worker token: delegate,<br/>list_workers, provider_usage" --> MCP
+  Keys -. "read per call" .-> MCP
+  Keys -. "process env only" .-> Run

@@ -1,0 +1,12 @@
+sequenceDiagram
+  participant U as You
+  participant CC as Claude Code (window A)
+  participant WD as Window A's working copy
+  participant X as CPPO
+  U->>CC: /login as another account
+  CC->>WD: writes the new token and identity
+  X->>WD: notices (polls every 2 s)
+  X->>X: new email? save it as ~/.claude-name<br/>known email? refresh its store
+  X->>X: bind window A to it · remember it for this folder<br/>mirror it into ~/.claude
+  X->>CC: reload window A ("Signed in as …")
+  Note over X: automatic reloads: at most one a minute,<br/>else a button — never a reload loop

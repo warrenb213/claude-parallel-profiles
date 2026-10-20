@@ -1,0 +1,10 @@
+stateDiagram-v2
+  direction LR
+  [*] --> queued: start_task
+  queued --> running: slot free, predecessor ended
+  queued --> cancelled: cancel_task
+  running --> done: worker reported
+  running --> stopped: limit reached or cancel_task
+  running --> failed: nothing collected
+  done --> applied: apply_task_changes
+  stopped --> applied: apply_task_changes

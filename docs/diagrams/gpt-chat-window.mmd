@@ -1,0 +1,3 @@
+flowchart LR
+  CC["Claude Code<br/>(this window)"] -- "Anthropic Messages API,<br/>proxy key" --> P["LiteLLM proxy<br/>127.0.0.1"]
+  P -- "OpenAI API, your API key<br/>(in the proxy's memory only)" --> O["api.openai.com"]

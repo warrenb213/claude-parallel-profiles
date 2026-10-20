@@ -1,0 +1,11 @@
+flowchart LR
+  CC["Claude Code<br/>(this window)"]
+  P["LiteLLM proxy<br/>127.0.0.1, its own key<br/>(opt-in, per provider)"]
+  A["Anthropic<br/>account login"]
+  K["api.anthropic.com<br/>with an API key"]
+  G["Gateway<br/>Z.ai · Poe · custom"]
+  CC -- "Anthropic" --> A
+  CC -- "Anthropic API key" --> K
+  CC -- "Gateway: Claude models,<br/>or Anthropic-compatible ones" --> G
+  CC -- "Gateway: non-Claude models<br/>(OpenAI format only)" --> P
+  P -- "translated both ways;<br/>Claude models pass through" --> G
