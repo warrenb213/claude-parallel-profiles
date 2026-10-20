@@ -460,7 +460,7 @@ export class DelegateServer implements vscode.Disposable {
         description:
           "How much of each worker provider's plan is used (e.g. the Anthropic subscription's 5-hour and weekly " +
           "windows, Z.ai's credit windows) and this window's worker calls so far. Check it to spread work across " +
-          'subscriptions instead of exhausting one.',
+          "the different services the user has, as the user's roles already do.",
         inputSchema: { type: 'object', properties: {} },
       },
       ...(lead ? this.agentTools() : []),

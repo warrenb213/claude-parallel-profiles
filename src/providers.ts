@@ -526,6 +526,24 @@ function workerId(p: Provider, model: string): string {
 }
 
 /**
+ * Which service a provider is, for the terms warning: two providers of the same
+ * service on one host — two Z.ai keys, a second Codex sign-in, two Anthropic API
+ * keys — are two accounts with that service.
+ */
+function serviceOf(p: Provider): { key: string; label: string } {
+  if (isNative(p)) return { key: 'anthropic-api', label: 'Anthropic' };
+  if (isCodex(p)) return { key: 'openai', label: 'OpenAI' };
+  if (p.preset) return { key: p.preset, label: PRESETS[p.preset].label };
+  let host = p.baseUrl;
+  try {
+    host = new URL(p.baseUrl).host;
+  } catch {
+    /* keep the URL */
+  }
+  return { key: `custom:${host}`, label: host };
+}
+
+/**
  * A model some provider of this account can serve, whether or not it is enabled
  * as a worker yet, and what it can do — the orchestration panel's inventory.
  */
@@ -1394,6 +1412,7 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
       ...(presetId && { preset: presetId }),
       ...(preset?.models && { models: { ...preset.models } }),
     };
+    if (!(await this.termsCheck(provider))) return;
     await this.context.secrets.store(this.secretKey(provider.id), key.trim());
     await this.save([...this.list(), provider]);
     log(`provider added: ${provider.name} (${provider.baseUrl}, ${provider.auth}${presetId ? `, preset ${presetId}` : ''})`);
@@ -1420,6 +1439,33 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
     }
 
     await this.offerNewProvider(added, key.trim(), found);
+  }
+
+  /**
+   * Before adding a provider: if this host already has one of the same service —
+   * for this account or another — say plainly that several accounts or keys with
+   * one service, used to get around its limits, can break its terms. The user
+   * decides; separate accounts for separate purposes (personal, an employer's)
+   * are a normal reason. False if they cancel.
+   */
+  private async termsCheck(p: Provider): Promise<boolean> {
+    const svc = serviceOf(p);
+    const all = this.state.get<Record<string, Provider[]>>('claudeProfiles.providers', {});
+    const existing = Object.entries(all).flatMap(([email, list]) =>
+      list.filter((x) => x.id !== p.id && serviceOf(x).key === svc.key).map((x) => `"${x.name}" (${email})`)
+    );
+    if (existing.length === 0) return true;
+    log(`provider: second ${svc.label} on this host (already: ${existing.join(', ')}) — terms warning shown`);
+    const ok = await vscode.window.showWarningMessage(
+      `This host already has ${svc.label} set up: ${existing.join(', ')}.\n\n` +
+        `Using more than one ${svc.label} account or key — for example, to get around a plan's usage limits — ` +
+        `may break ${svc.label}'s terms of service. This extension doesn't check or work around anyone's terms; ` +
+        `make sure what you're doing is allowed (separate accounts for separate purposes, such as personal and ` +
+        `an employer's, are the usual reason).`,
+      { modal: true },
+      'Add it anyway'
+    );
+    return ok === 'Add it anyway';
   }
 
   /**
@@ -1489,6 +1535,7 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
       if (!key) return;
     }
     let provider: Provider = { id: crypto.randomBytes(6).toString('hex'), name: name.trim(), kind: 'codex', codexAuth: auth, baseUrl: '', auth: 'bearer' };
+    if (!(await this.termsCheck(provider))) return;
     if (key) await this.context.secrets.store(this.secretKey(provider.id), key);
     await this.save([...this.list(), provider]);
     log(`provider added: ${provider.name} (OpenAI Codex, ${auth}, ${bin})`);
@@ -1601,6 +1648,7 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
       baseUrl: ANTHROPIC_API,
       auth: 'x-api-key',
     };
+    if (!(await this.termsCheck(provider))) return;
     await this.context.secrets.store(this.secretKey(provider.id), key.trim());
     await this.save([...this.list(), provider]);
     log(`provider added: ${provider.name} (Anthropic API key)`);

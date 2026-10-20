@@ -6,7 +6,7 @@
 
 **A companion for the [Claude Code extension for VS Code](https://marketplace.visualstudio.com/items?itemName=anthropic.claude-code): a different Claude account in each VS Code window, at the same time, with one shared conversation history — and, per window, a choice of who serves and bills the requests, plus other models the window's AI can hand work to.**
 
-Claude Code signs you into **one** account, shared by every window. This extension gives **each window its own account** (personal, work, a second plan for when the first hits its limits), keeps your conversations in one history across all of them, and lets each window bill to its Anthropic login, an Anthropic API key, or a gateway such as Z.ai. The window's Claude can also consult or delegate real work to other models you enable — GLM on Z.ai, GPT through OpenAI Codex, or Claude on your own subscription — and you review what they change before it lands.
+Claude Code signs you into **one** account, shared by every window. This extension gives **each window its own account** (personal and work, or separate organizations), keeps your conversations in one history across all of them, and lets each window bill to its Anthropic login, an Anthropic API key, or a gateway such as Z.ai. The window's Claude can also consult or delegate real work to other models you enable — GLM on Z.ai, GPT through OpenAI Codex, or Claude on your own subscription — and you review what they change before it lands.
 
 It's a **companion**, not a replacement: the official Claude Code extension must be installed.
 
@@ -22,7 +22,7 @@ It's a **companion**, not a replacement: the official Claude Code extension must
 - [Architecture](#architecture) · [Requirements](#requirements) · [Install](#install)
 - [Accounts](#accounts) · [One conversation history](#one-conversation-history)
 - [Providers](#providers) · [Workers](#workers) · [Orchestration: roles and fallbacks](#orchestration-roles-and-fallbacks) · [Seeing what workers did](#seeing-what-workers-did)
-- [Commands](#commands) · [Privacy & your data](#privacy--your-data) · [Uninstalling](#uninstalling) · [Limitations](#limitations)
+- [Commands](#commands) · [Privacy & your data](#privacy--your-data) · [Terms of service](#terms-of-service) · [Uninstalling](#uninstalling) · [Limitations](#limitations)
 - [How it works](#how-it-works) · [Development & releases](#development--releases)
 
 ---
@@ -32,11 +32,11 @@ It's a **companion**, not a replacement: the official Claude Code extension must
 - **Sign in as usual**, through Claude Code's own account menu or `/login`. The extension notices and saves the account by itself; the account *is* its email.
 - **Each window picks its account** from the status bar. Two windows run two accounts at once — no logout/login dance. The window's integrated terminals get the same account.
 - **Switching reloads the window.** Claude Code reads its account once at start-up, so only a reload makes it both *show* and *bill* the account you picked.
-- **History stays one whole.** Hit a usage limit, switch account, continue the same conversation.
+- **History stays one whole.** Move between your accounts — say, personal and work — and your conversations come with you.
 - **Each window picks its provider too:** the account's Anthropic login (the default), an Anthropic API key, or a gateway such as Z.ai's GLM Coding Plan.
 - **Workers:** the window's Claude can ask other models you enabled for answers, or have them do real work in a scratch copy of your repo, which it reviews before applying — including GPT through **OpenAI Codex**, on your ChatGPT plan, and 2D art from Codex's image generation.
 - **Orchestration:** you decide once which models serve which kind of work — reviews, implementation, hard questions, art — at what effort, and what takes over when a plan runs low. The lead asks by role; the extension picks, the same way every time, and says who served.
-- **Usage awareness:** each plan's 5-hour and weekly windows (Anthropic, Codex, Z.ai) are read without spending anything, shown in the hover and the orchestration panel, and used to route around a plan that's nearly used up.
+- **Usage awareness:** each plan's 5-hour and weekly windows (Anthropic, Codex, Z.ai) are read without spending anything, shown in the hover and the orchestration panel, and used to balance work across the different services you use.
 - **Forget really signs out**, and **uninstalling really cleans up**: your history goes back into the default `~/.claude`, your last account stays signed in there.
 
 ---
@@ -363,6 +363,7 @@ flowchart LR
 - **The panel** shows every model your providers offer — enabled or not — with what each can do (*answers*, *agent tasks*, *images*, *sees images*) and its plan's usage with reset times; each role's chain to reorder, extend or switch off; the thresholds; and, live as you edit, who would serve each role. A role's *Add* list holds every model that can do that kind of work; one that isn't enabled yet is marked *enabled on save*, and saving enables what the roles use (as a worker, and for agent tasks where the role needs them) after one confirmation. *Suggest from all models* builds chains from everything available, strongest current model first and the first fallback on another provider.
 - **Where capabilities come from.** Codex says which models it offers, which take images, and whether the account can generate them (`model/list`, `modelProvider/capabilities/read`); a gateway's model list says what it serves to Claude Code; agent tasks need a provider key or Codex, so models on the Anthropic login answer only.
 - The window's own chat can't switch providers mid-conversation (that takes a reload); roles cover the work the lead hands off.
+- **Chains are for different services.** They balance work across the services you use — your Anthropic plan, Z.ai, Codex. Chaining several accounts or keys of one service to stretch its limits may break that service's terms; see [Terms of service](#terms-of-service).
 
 ### `delegate`: answers only
 
@@ -447,7 +448,7 @@ stateDiagram-v2
 The account's hover card lists the workers and the recent tasks: worker, progress and current action while running; files changed and whether applied when done; why it stopped.
 
 - **Transcripts.** A task's worker name in the hover opens that task's transcript; a worker under *Workers* (with a count) lists its tasks and consultations in this window. Transcripts open in the Markdown preview. A task's shows its run — messages, each tool call with its command or edit, results and thinking collapsed, the report and changes — and follows along while it runs; a consultation's shows the question, context and answer. Also *Claude Accounts: Show Worker Transcripts*. Consultations are kept in memory only, the latest 50.
-- **Usage.** `provider_usage` (for the lead and for runs) and *Claude Accounts: Show Provider Usage* report how much of each plan is used, so work can be spread across subscriptions instead of exhausting one: the Anthropic login's 5-hour, weekly and per-model weekly windows (from the usage report Claude Code caches in this account's windows — just a file read — and its rate-limit reports on login-worker calls), the ChatGPT plan's Codex windows (from Codex itself, without sending a message), Z.ai's Coding Plan windows (from its quota monitor — unofficial, may change), and this window's calls, tasks and tokens per worker.
+- **Usage.** `provider_usage` (for the lead and for runs) and *Claude Accounts: Show Provider Usage* report how much of each plan is used, so work can be balanced across the different services you use: the Anthropic login's 5-hour, weekly and per-model weekly windows (from the usage report Claude Code caches in this account's windows — just a file read — and its rate-limit reports on login-worker calls), the ChatGPT plan's Codex windows (from Codex itself, without sending a message), Z.ai's Coding Plan windows (from its quota monitor — unofficial, may change), and this window's calls, tasks and tokens per worker.
 
 ### OpenAI Codex as a worker
 
@@ -539,6 +540,16 @@ This extension manages credentials, so it holds itself to a strict policy — ea
 - **Elsewhere:** `claude auth status` is asked locally, read-only; the process list is scanned only during *Forget*, to stop `claude` processes on the token being deleted.
 - **Restricted by its manifest:** disabled in virtual workspaces, and in Restricted Mode (untrusted folders) it never reads workspace content ([`capabilities`](package.json)).
 - **Inert off Linux** — no operations at all; the uninstall hook is guarded the same way.
+
+---
+
+## Terms of service
+
+Every account, key and plan you connect is governed by its provider's terms — Anthropic's, OpenAI's, Z.ai's, Poe's, your gateway's — and **you are responsible for following them**. This extension doesn't check, enforce or work around anyone's terms, and nothing in it is meant as a way to get around a provider's usage limits.
+
+- **Several accounts with one service.** Many providers don't allow using more than one account or key to get around usage limits. Separate accounts for separate purposes — personal and work, or different organizations — are the reason this extension supports several. When you save a second Claude account, or add a provider of a service this host already has (a second Z.ai key, a second Codex sign-in, a second Anthropic API key…), the extension says so and points to that service's terms.
+- **Subscriptions are used only by their own clients.** A Claude plan is only ever used by Claude Code, a ChatGPT plan only by Codex; the extension never reads, copies or sends their tokens, and doesn't route them through anything else (see [GPT in chat windows](#gpt-in-chat-windows-openai-api-key) for why a ChatGPT plan can't serve a chat window here).
+- **What you send to a worker** goes to that provider under its terms and data policies.
 
 ---
 

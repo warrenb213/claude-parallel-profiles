@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.15.2 — 2026-10-20
+
+### Added
+
+- **Terms warnings.** Adding a provider of a service this host already has — for this account or another (a second Z.ai key, a second Codex sign-in or OpenAI key, a second Anthropic API key, a second custom gateway on the same host name) — asks first, saying that more than one account or key with one service, used to get around its usage limits, may break its terms; *Add it anyway* continues. Saving a second Claude account adds the same note to the sign-in notice. The extension doesn't check or work around anyone's terms.
+
+### Changed
+
+- **Wording.** The README and the lead's tool descriptions no longer suggest keeping a second account for when one hits its limits; accounts are for separate purposes (personal, work, organizations), and roles balance work across different services. New *Terms of service* section in the README.
+
 ## 1.15.1 — 2026-10-20
 
 ### Changed

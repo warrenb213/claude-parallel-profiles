@@ -35,6 +35,19 @@ export const NOTICE_KEY = 'claudeProfiles.pendingNotice';
 const RELOAD_STAMP_KEY = 'claudeProfiles.lastAutoReload';
 
 export class SetupWizard {
+  /** Set when a second (or further) Claude account was just saved: the next notice carries the terms note. */
+  private termsNote = false;
+
+  /** The terms note, once, for the notice about a newly saved account beside others. */
+  private takeTermsNote(): string {
+    if (!this.termsNote) return '';
+    this.termsNote = false;
+    return (
+      ' A note on terms: using more than one Claude account to get around usage limits may break Anthropic\'s ' +
+      'terms — keep each account for its own purpose (such as personal and work), and check the terms that apply to you.'
+    );
+  }
+
   constructor(
     private readonly registry: AccountRegistry,
     private readonly binding: WindowBinding,
@@ -177,6 +190,9 @@ export class SetupWizard {
         return { name, dir: path.join(os.homedir(), `.claude-${name}`), email: status.email };
       })();
 
+    // A new account beside others: the terms note rides along with the notice that follows.
+    const others = this.registry.listUniqueByEmail().filter((a) => this.registry.emailOf(a) !== status.email);
+    if (!restored && others.length > 0) this.termsNote = true;
     try {
       snapshotAccount(sourceDir, target.dir, status);
       if (!restored) markCreated(target.dir); // ours: uninstall may delete it (see STORE_MARKER)
@@ -189,7 +205,7 @@ export class SetupWizard {
     await this.registry.add(target);
     await this.binding.bind(target);
     if (!opts.quiet) {
-      vscode.window.showInformationMessage(`Saved ${status.email} — this window is bound to it.`);
+      vscode.window.showInformationMessage(`Saved ${status.email} — this window is bound to it.${this.takeTermsNote()}`);
     }
     return target;
   }
@@ -303,7 +319,7 @@ export class SetupWizard {
     if (onDefault) {
       await this.requestWindowReload(
         `${email} is set up. This window now runs it in a directory of its own — signing in to ` +
-          `another account here will no longer disturb your other windows.`
+          `another account here will no longer disturb your other windows.${this.takeTermsNote()}`
       );
     } else if (changed && active) {
       // The user signed in as a different account INSIDE this window. The bind
@@ -313,7 +329,7 @@ export class SetupWizard {
       // but isn't, and the Switch list marks the new account as "current" so
       // picking it is a no-op: "switch does nothing until I reload by hand".
       await this.requestWindowReload(
-        `Signed in as ${email} — the window was reloaded so Claude Code fully switches to it.`
+        `Signed in as ${email} — the window was reloaded so Claude Code fully switches to it.${this.takeTermsNote()}`
       );
     }
   }
