@@ -3,7 +3,7 @@
 [![Release](https://img.shields.io/github/v/release/warrenb213/cppo?label=release)](https://github.com/warrenb213/cppo/releases/latest)
 [![Platform: Linux](https://img.shields.io/badge/platform-Linux%20%7C%20WSL%20%7C%20SSH-orange.svg)](#requirements)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Donate](https://img.shields.io/badge/donate-PayPal-00457C.svg?logo=paypal)](https://paypal.me/beboutit503)
+[![Donate](https://img.shields.io/badge/donate-PayPal-00457C.svg?logo=paypal)](https://paypal.me/beboutit503) [![Scan to donate through PayPal: paypal.me/beboutit503](docs/support/paypal-qr.png)](https://paypal.me/beboutit503)
 
 **Make Claude Code the lead of a multi-model team.** The Claude in your chat hands focused questions and real, sandboxed coding work to the other models you use — GLM on Z.ai, GPT through OpenAI Codex, Claude on your own plan — routes each kind of work by rules you set once, and reviews every change before it reaches your code. Underneath: a different Claude account in each VS Code window, with one shared conversation history.
 
@@ -446,9 +446,7 @@ The README's diagrams are PNGs rendered from the Mermaid sources in `docs/diagra
 
 ## Support CPPO
 
-CPPO is free and open source. If it saves you time, you can support its development through [PayPal](https://paypal.me/beboutit503) — scan the code with your phone, or click it. Thank you.
-
-[![QR code: donate to CPPO through PayPal — paypal.me/beboutit503](docs/support/paypal-qr.png)](https://paypal.me/beboutit503)
+CPPO is free and open source. If it saves you time, you can support its development through [PayPal](https://paypal.me/beboutit503) — or scan the code at the top of this page. Thank you.
 
 ---
 
