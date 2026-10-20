@@ -6,6 +6,7 @@ import { WindowBinding } from './binding';
 import { LOGIN_PROVIDER } from './delegate';
 import type { Worker, WorkerSource } from './delegate';
 import type { AgentRunSpec } from './agentTasks';
+import type { RolePolicy } from './roles';
 import { HostState } from './hostState';
 import { readIdentity } from './accounts';
 import { allWorkingDirs, workingRoot } from './workdir';
@@ -13,6 +14,18 @@ import { NOTICE_KEY } from './setupWizard';
 import { log } from './log';
 import { CatalogModel, Family, FAMILIES, fetchCatalog, modelSettings, newest, OtherModel, toAnthropic } from './modelCatalog';
 import { ensureProxy, install, isInstalled, ProxyHandle, proxyConfig, proxyLogFile, proxyPort, stopProxy } from './litellm';
+import {
+  CODEX_FALLBACK_MODELS,
+  CodexAuth,
+  codexBinary,
+  CodexContext,
+  CodexModel,
+  codexCapabilities,
+  codexModels,
+  keyCodexHome,
+  testCodex,
+  userCodexHome,
+} from './codex';
 
 /**
  * Billing providers: WHERE a window's requests go and WHO pays for them, kept
@@ -61,8 +74,18 @@ import { ensureProxy, install, isInstalled, ProxyHandle, proxyConfig, proxyLogFi
 export interface Provider {
   id: string;
   name: string;
-  /** 'anthropic': an Anthropic API key, sent straight to Anthropic. Unset: a gateway. */
-  kind?: 'anthropic';
+  /**
+   * 'anthropic': an Anthropic API key, sent straight to Anthropic. 'codex': OpenAI
+   * Codex — GPT through the Codex CLI for workers and agent tasks (codex.ts); on
+   * an API key, also chat windows through the local proxy. Unset: a gateway.
+   */
+  kind?: 'anthropic' | 'codex';
+  /** Codex only: its ChatGPT plan (Codex's own sign-in) or an OpenAI API key. */
+  codexAuth?: CodexAuth;
+  /** Codex only: the models it offers, from its `model/list`. */
+  codexModels?: CodexModel[];
+  /** Codex only: the account can generate images (`modelProvider/capabilities/read`). */
+  codexImages?: boolean;
   /** A gateway added from a preset (see PRESETS); unset for a custom one. */
   preset?: GatewayPreset;
   baseUrl: string;
@@ -99,6 +122,45 @@ const CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 const legacySecretKey = (id: string) => `claudeProfiles.provider.${id}`;
 const ANTHROPIC_API = 'https://api.anthropic.com';
 const isNative = (p: Provider) => p.kind === 'anthropic';
+const isCodex = (p: Provider) => p.kind === 'codex';
+
+/** A Codex provider that can serve a chat window: an API key (a ChatGPT plan is Codex's own — workers only). */
+const chatCapable = (p: Provider) => !isCodex(p) || p.codexAuth === 'api-key';
+
+const OPENAI_API = 'https://api.openai.com';
+
+/** Where the local proxy sends a provider's translated models. */
+function proxyBase(p: Provider): string {
+  return isCodex(p) ? OPENAI_API : p.baseUrl;
+}
+
+/**
+ * Claude Code's model slots on an OpenAI window. Every request names one of
+ * them (the haiku slot also runs titles and summaries), so each gets a GPT
+ * model the window enabled: the user's pick, else the closest match.
+ */
+function codexSlots(p: Provider): Partial<Record<Family, string>> {
+  const on = p.extraModels ?? [];
+  if (on.length === 0) return {};
+  const pick = (chosen: string | undefined, pref: string[]) =>
+    (chosen && on.includes(chosen) ? chosen : undefined) ?? pref.find((m) => on.includes(m)) ?? on[0];
+  return {
+    opus: pick(p.models?.opus, ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol']),
+    sonnet: pick(p.models?.sonnet, ['gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-astra']),
+    haiku: pick(p.models?.haiku, ['gpt-6-luna', 'gpt-5.6-luna', 'gpt-6.1-sol']),
+  };
+}
+
+/** What the provider is, in a menu's description column. */
+function describeKind(p: Provider): string {
+  if (isNative(p)) return 'Anthropic API key';
+  if (isCodex(p)) {
+    return p.codexAuth === 'api-key'
+      ? `OpenAI Codex · API key · workers${p.extraModels?.length ? ' + chat windows' : ''}`
+      : 'OpenAI Codex · ChatGPT plan · workers';
+  }
+  return p.preset ? PRESETS[p.preset].label : p.baseUrl;
+}
 
 /**
  * Gateways known well enough to set up from a name and a key. Anything else is
@@ -150,7 +212,7 @@ const PRESETS: Record<GatewayPreset, PresetDef> = {
 
 /** Whether a provider's models come from its /v1/models list (custom gateways and Poe) or are fixed. */
 function readsCatalog(p: Provider): boolean {
-  if (isNative(p)) return false;
+  if (isNative(p) || isCodex(p)) return false;
   return p.preset ? PRESETS[p.preset].readsCatalog : true;
 }
 
@@ -260,6 +322,32 @@ export function settingsFor(p: Provider, key: string, proxy?: ProxyHandle): Prov
   // can't redirect it; Claude Code's own model lineup applies unchanged.
   if (isNative(p)) {
     return { env: { ANTHROPIC_BASE_URL: ANTHROPIC_API, ANTHROPIC_API_KEY: key, ANTHROPIC_AUTH_TOKEN: '' }, top: {}, keepTop: true };
+  }
+  if (isCodex(p)) {
+    // OpenAI, API key: every model is translated by the local proxy — none is
+    // Claude, and OpenAI isn't Anthropic-compatible, so there's no direct path.
+    if (!proxy) throw new Error(`${p.name} needs the local LiteLLM proxy for chat windows, and it isn't running.`);
+    const slots = codexSlots(p);
+    const on = p.extraModels ?? [];
+    return {
+      env: {
+        ANTHROPIC_BASE_URL: `http://127.0.0.1:${proxy.port}`,
+        ANTHROPIC_AUTH_TOKEN: proxy.masterKey,
+        ANTHROPIC_API_KEY: '',
+        ...(slots.opus && { ANTHROPIC_DEFAULT_OPUS_MODEL: slots.opus }),
+        ...(slots.sonnet && { ANTHROPIC_DEFAULT_SONNET_MODEL: slots.sonnet }),
+        ...(slots.haiku && { ANTHROPIC_DEFAULT_HAIKU_MODEL: slots.haiku }),
+        // Anthropic's beta headers and in-request safety checks mean nothing to OpenAI.
+        CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
+        CLAUDE_CODE_AUTO_MODE_SERVER: '0',
+      },
+      top: {
+        // Only the enabled GPT models: a Claude model saved earlier falls back to one of them.
+        availableModels: on,
+        enforceAvailableModels: true,
+        modelPicker: { options: on.map((id) => ({ model: id, description: `${p.name} · OpenAI, translated by the local LiteLLM proxy` })) },
+      },
+    };
   }
   const models = modelSettings(p.catalog, p.models);
   // Through the proxy, the window holds only the proxy's own key; the gateway key
@@ -389,6 +477,12 @@ const LOGIN_WORKER_NOTES: Record<string, string> = {
 
 /** The models a provider can offer as workers, with a one-line note for the lead. */
 export function workerChoices(p: Provider): Array<{ model: string; note: string }> {
+  if (isCodex(p)) {
+    return (p.codexModels?.length ? p.codexModels : CODEX_FALLBACK_MODELS).map((m) => ({
+      model: m.id,
+      note: `${m.name} — ${m.note.replace(/\.$/, '')} (Codex)`,
+    }));
+  }
   if (isNative(p)) {
     return [
       { model: 'claude-haiku-5-5', note: 'Claude Haiku — fast: summaries, bulk rewriting, quick checks' },
@@ -423,6 +517,32 @@ function parseModels(input: string): Provider['models'] | string {
     models[m[1].toLowerCase() as Family] = m[2];
   }
   return models;
+}
+
+/** A worker's id: "<provider name, slugged>/<model>" (e.g. "z-ai/glm-5.3"). */
+function workerId(p: Provider, model: string): string {
+  const slug = p.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'provider';
+  return `${slug}/${model}`;
+}
+
+/**
+ * A model some provider of this account can serve, whether or not it is enabled
+ * as a worker yet, and what it can do — the orchestration panel's inventory.
+ */
+export interface ModelOffer {
+  id: string;
+  providerId: string;
+  providerName: string;
+  model: string;
+  note: string;
+  kind?: 'login' | 'codex';
+  preset?: string;
+  plan: boolean;
+  can: { answer: boolean; agent: boolean; image: boolean; vision: boolean };
+  /** Why a capability is missing, shown next to it. */
+  limits: string[];
+  enabled: boolean;
+  agentEnabled: boolean;
 }
 
 export class ProviderManager implements vscode.Disposable, WorkerSource {
@@ -576,7 +696,8 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
   /** The provider this window bills to; undefined = its Anthropic login. */
   active(): Provider | undefined {
     const id = this.context.workspaceState.get<string>(ACTIVE_KEY);
-    return id ? this.get(id) : undefined;
+    const p = id ? this.get(id) : undefined;
+    return p && chatCapable(p) ? p : undefined;
   }
 
   /**
@@ -627,7 +748,6 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
 
   /** WorkerSource: every model of this account's providers enabled as a worker. */
   workers(): Worker[] {
-    const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'provider';
     const login = this.loginWorkers().map((model) => ({
       id: `anthropic-login/${model}`,
       providerId: '__login__',
@@ -637,19 +757,23 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
       auth: 'x-api-key' as const,
       note: `${LOGIN_WORKER_NOTES[model] ?? model} — on this account's own subscription`,
       kind: 'login' as const,
+      plan: true,
     }));
     return [...login, ...this.list().flatMap((p) => {
       const notes = new Map(workerChoices(p).map((c) => [c.model, c.note]));
       return (p.workers ?? []).map((model) => ({
-        id: `${slug(p.name)}/${model}`,
+        id: workerId(p, model),
         providerId: p.id,
         providerName: p.name,
         model,
-        baseUrl: isNative(p) ? ANTHROPIC_API : p.baseUrl,
+        baseUrl: isNative(p) ? ANTHROPIC_API : isCodex(p) ? '' : p.baseUrl,
         auth: isNative(p) ? ('x-api-key' as const) : p.auth,
         note: notes.get(model) ?? `${model} on ${p.name}`,
         agent: (p.agentWorkers ?? []).includes(model),
         ...(p.preset && { preset: p.preset }),
+        ...(isCodex(p) && { kind: 'codex' as const, efforts: p.codexModels?.find((x) => x.id === model)?.efforts, images: p.codexImages }),
+        // Billed to a plan, not per token: spent first by the role templates (roles.ts).
+        plan: p.preset === 'zai' || p.preset === 'poe' || (isCodex(p) && p.codexAuth !== 'api-key'),
       }));
     })];
   }
@@ -691,6 +815,10 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
     const w = this.workers().find((x) => x.id === workerId && x.agent);
     const p = w && this.list().find((x) => x.id === w.providerId);
     if (!w || !p) return undefined;
+    if (isCodex(p)) {
+      const codex = await this.codexContext(p.id);
+      return codex ? { runner: 'codex', runModel: w.model, settings: {}, secretEnv: {}, codex } : undefined;
+    }
     if (p.extraModels?.includes(w.model)) return undefined; // translated models need the proxy; not for agent tasks
     const key = await this.keyFor(p.id);
     if (!key) return undefined;
@@ -705,6 +833,153 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
       secretEnv: { ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY },
       ...(ANTHROPIC_API_KEY && { approveKeyTail: ANTHROPIC_API_KEY.trim().slice(-20) }),
     };
+  }
+
+  /**
+   * WorkerSource: how to run Codex for a Codex provider — its binary, its Codex
+   * home (the user's own sign-in for a ChatGPT plan, a private one for an API
+   * key) and, for an API key, the key in the run's environment only.
+   */
+  async codexContext(providerId: string): Promise<CodexContext | undefined> {
+    const p = this.list().find((x) => x.id === providerId);
+    if (!p || !isCodex(p)) return undefined;
+    const bin = await codexBinary();
+    if (!bin) return undefined;
+    const efforts = Object.fromEntries((p.codexModels ?? []).filter((m) => m.efforts?.length).map((m) => [m.id, m.efforts!]));
+    if (p.codexAuth === 'api-key') {
+      const key = await this.keyFor(p.id);
+      if (!key) return undefined;
+      return { bin, home: keyCodexHome(workingRoot(), p.id), env: { CODEX_API_KEY: key }, auth: 'api-key', efforts };
+    }
+    return { bin, home: userCodexHome(), env: {}, auth: 'chatgpt', efforts };
+  }
+
+  /**
+   * Every model this account's providers can serve as a worker, with what each
+   * can do and whether it's enabled. Capabilities come from the providers
+   * themselves where they say (Codex: `model/list` and its capabilities; a
+   * gateway: its model list) and from what each kind of provider supports.
+   */
+  offers(): ModelOffer[] {
+    const out: ModelOffer[] = [];
+    const login = new Set(this.loginWorkers());
+    for (const [model, note] of Object.entries(LOGIN_WORKER_NOTES)) {
+      out.push({
+        id: `anthropic-login/${model}`, providerId: '__login__', providerName: LOGIN_PROVIDER, model, note, kind: 'login', plan: true,
+        can: { answer: true, agent: false, image: false, vision: true },
+        limits: ['agent tasks: not on the login (they run Claude Code on a provider key)'],
+        enabled: login.has(model), agentEnabled: false,
+      });
+    }
+    for (const p of this.list()) {
+      const on = new Set(p.workers ?? []);
+      const agentOn = new Set(p.agentWorkers ?? []);
+      const plan = p.preset === 'zai' || p.preset === 'poe' || (isCodex(p) && p.codexAuth !== 'api-key');
+      for (const c of workerChoices(p)) {
+        const cm = isCodex(p) ? p.codexModels?.find((m) => m.id === c.model) : undefined;
+        const image = isCodex(p) && p.codexImages !== false;
+        const limits: string[] = [];
+        if (isCodex(p) && p.codexImages === false) limits.push('images: this account has no image generation');
+        if (isCodex(p) && p.codexImages === undefined) limits.push('images: not checked yet');
+        out.push({
+          id: workerId(p, c.model), providerId: p.id, providerName: p.name, model: c.model, note: c.note,
+          ...(isCodex(p) && { kind: 'codex' as const }), ...(p.preset && { preset: p.preset }), plan,
+          can: { answer: true, agent: true, image, vision: isCodex(p) ? Boolean(cm?.vision) : /claude/i.test(c.model) || isNative(p) },
+          limits,
+          enabled: on.has(c.model), agentEnabled: agentOn.has(c.model),
+        });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Enables models as workers (and, where asked, for agent tasks) — what saving
+   * roles that use them needs. One confirmation for all of it, saying where the
+   * work goes. False if declined.
+   */
+  async enableOffers(ids: string[], agentIds: string[]): Promise<boolean> {
+    const offers = this.offers();
+    const need = offers.filter((o) => (ids.includes(o.id) && !o.enabled) || (agentIds.includes(o.id) && !o.agentEnabled));
+    if (need.length === 0) return true;
+    const byProvider = new Map<string, ModelOffer[]>();
+    for (const o of need) byProvider.set(o.providerName, [...(byProvider.get(o.providerName) ?? []), o]);
+    const lines = [...byProvider].map(
+      ([name, os]) => `• ${name}: ${os.map((o) => `${o.model}${agentIds.includes(o.id) && !o.agentEnabled ? ' (+ agent tasks)' : ''}`).join(', ')}`
+    );
+    const agents = need.some((o) => agentIds.includes(o.id) && !o.agentEnabled);
+    const ok = await vscode.window.showWarningMessage(
+      `Your roles use models that aren't enabled yet. Enable them?\n\n${lines.join('\n')}\n\n` +
+        `• The lead decides what to send each one: the task and the code or text it pastes in goes to that provider ` +
+        `(billed to its key, or counted toward its plan).\n` +
+        (agents
+          ? `• Agent tasks run that model headless in a scratch git worktree of your repo — reading and editing files ` +
+            `there and running commands (Claude Code in auto mode, or Codex in its sandbox). Nothing reaches your ` +
+            `working tree unless the lead applies the diff.\n`
+          : '') +
+        `• Off again any time under "Edit or Remove a Provider → Workers".`,
+      { modal: true },
+      'Enable and save'
+    );
+    if (ok !== 'Enable and save') return false;
+    const loginAdd = need.filter((o) => o.kind === 'login').map((o) => o.model);
+    if (loginAdd.length) await this.setLoginWorkers([...new Set([...this.loginWorkers(), ...loginAdd])]);
+    const list = this.list().map((p) => {
+      const mine = need.filter((o) => o.providerId === p.id);
+      if (mine.length === 0) return p;
+      const workers = new Set(p.workers ?? []);
+      const agentsOn = new Set(p.agentWorkers ?? []);
+      for (const o of mine) {
+        workers.add(o.model);
+        if (agentIds.includes(o.id)) agentsOn.add(o.model);
+      }
+      return { ...p, workers: [...workers], agentWorkers: agentsOn.size ? [...agentsOn] : undefined };
+    });
+    await this.save(list);
+    log(`orchestration: enabled ${need.map((o) => o.id).join(', ')}`);
+    this.onDidChange.fire();
+    return true;
+  }
+
+  /** Codex facts older versions didn't record (image generation, vision), read quietly once. */
+  async ensureCodexFacts(): Promise<void> {
+    for (const p of this.list()) {
+      if (!isCodex(p) || (p.codexImages !== undefined && p.codexModels?.every((m) => m.vision !== undefined))) continue;
+      const ctx = await this.codexContext(p.id);
+      if (!ctx) continue;
+      const [models, caps] = await Promise.all([codexModels(ctx), codexCapabilities(ctx)]);
+      const updated: Provider = { ...p, codexModels: models, ...(caps && { codexImages: caps.imageGeneration }) };
+      await this.save(this.list().map((x) => (x.id === p.id ? updated : x)));
+      log(`provider ${p.name}: Codex ${caps?.imageGeneration ? 'can' : 'cannot'} generate images; ${models.filter((m) => m.vision).length} models take images`);
+    }
+  }
+
+  /**
+   * WorkerSource: where Claude Code caches this account's plan usage — this
+   * window's own config dir, the account's store, and the other windows' dirs
+   * (filtered to this account by email when read).
+   */
+  claudeUsageDirs(): { dirs: string[]; email?: string } {
+    const own = this.binding.getEnvDir();
+    const dirs = [own, this.loginDir(), ...allWorkingDirs()].filter((d): d is string => Boolean(d));
+    return { dirs: [...new Set(dirs)], email: this.email() };
+  }
+
+  /** WorkerSource: this account's roles on this host, as the orchestration panel saved them. */
+  rolePolicy(): RolePolicy | undefined {
+    const email = this.email();
+    return email ? this.state.get<Record<string, RolePolicy>>('claudeProfiles.roles', {})[email] : undefined;
+  }
+
+  /** Saves this account's roles (undefined = back to the template). */
+  async saveRolePolicy(policy: RolePolicy | undefined): Promise<void> {
+    const email = this.email();
+    if (!email) throw new Error('This window has no signed-in account — roles belong to an account.');
+    const all = this.state.get<Record<string, RolePolicy>>('claudeProfiles.roles', {});
+    if (policy) all[email] = policy;
+    else delete all[email];
+    await this.state.update('claudeProfiles.roles', all);
+    this.onDidChange.fire();
   }
 
   /** WorkerSource: the provider's key, read from secret storage per call. */
@@ -826,7 +1101,7 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
         () => install(this.lockFile())
       );
     }
-    const config = proxyConfig(p.baseUrl, p.auth, claudeGatewayIds(p), p.extraModels);
+    const config = proxyConfig(proxyBase(p), p.auth, claudeGatewayIds(p), p.extraModels);
     return interactive
       ? vscode.window.withProgress(
           { location: vscode.ProgressLocation.Notification, title: `Starting the local proxy for ${p.name}…` },
@@ -838,15 +1113,26 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
   /** Points this window at `provider` (undefined = its Anthropic login) and reloads it. */
   private async useInWindow(provider: Provider | undefined): Promise<void> {
     let desired: ProviderSettings | undefined;
+    if (provider && !chatCapable(provider)) {
+      throw new Error(`${provider.name} runs on your ChatGPT plan, which only Codex itself may use — it can't serve a chat window. Add OpenAI Codex with an API key for that.`);
+    }
+    if (provider && isCodex(provider) && !provider.extraModels?.length) {
+      const picked = await this.pickChatModels(provider);
+      if (!picked?.extraModels?.length) return;
+      await this.save(this.list().map((p) => (p.id === picked.id ? picked : p)));
+      provider = picked;
+    }
     if (provider) {
       const key = await this.context.secrets.get(this.secretKey(provider.id));
       if (!key) throw new Error(`No key is stored for ${provider.name}. Edit the provider and set its key.`);
       provider = await this.refreshCatalog(provider, key);
-      desired = settingsFor(provider, key, await this.proxyFor(provider, key, true));
+      const proxy = await this.proxyFor(provider, key, true);
+      if (isCodex(provider) && !proxy) return; // LiteLLM declined or not installed: nothing changes
+      desired = settingsFor(provider, key, proxy);
     }
     await this.writeSettings(desired);
     await this.context.workspaceState.update(ACTIVE_KEY, provider?.id);
-    log(`provider: this window now bills to ${provider ? `${provider.name} (${provider.baseUrl})` : 'its Anthropic login'}`);
+    log(`provider: this window now bills to ${provider ? `${provider.name} (${proxyBase(provider)})` : 'its Anthropic login'}`);
     this.onDidChange.fire();
     // Claude Code keeps a long-lived process that read its env when it started;
     // only a reload makes the panel itself pick the change up.
@@ -967,9 +1253,16 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
         description: describeLogin(this.binding.getEnvDir()),
         detail: 'Default — this account\'s own login, straight to Anthropic',
       },
-      ...this.list().map((p) => ({
+      // A ChatGPT plan is Codex's own: workers only. An OpenAI API key goes through the proxy.
+      ...this.list().filter(chatCapable).map((p) => ({
         label: `${mark(current?.id === p.id)}${p.name}`,
-        description: isNative(p) ? 'Anthropic API key, billed per token' : p.preset ? PRESETS[p.preset].label : p.baseUrl,
+        description: isNative(p)
+          ? 'Anthropic API key, billed per token'
+          : isCodex(p)
+            ? 'OpenAI API key, billed per token · GPT through the local proxy'
+            : p.preset
+              ? PRESETS[p.preset].label
+              : p.baseUrl,
         provider: p,
       })),
       { label: '$(add) Add a provider…', add: true },
@@ -1023,7 +1316,7 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
   }
 
   async addInteractive(): Promise<void> {
-    type Choice = 'anthropic' | GatewayPreset | 'custom';
+    type Choice = 'anthropic' | GatewayPreset | 'codex' | 'custom';
     const choice = (
       await vscode.window.showQuickPick<vscode.QuickPickItem & { choice: Choice }>(
         [
@@ -1039,6 +1332,12 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
             choice: id,
           })),
           {
+            label: '$(hubot) OpenAI Codex',
+            description: 'workers and agent tasks',
+            detail: 'GPT through the Codex CLI on your ChatGPT plan or an OpenAI API key — and, with an API key, in chat windows too (local proxy)',
+            choice: 'codex',
+          },
+          {
             label: '$(gear) Custom Anthropic-compatible gateway',
             detail: 'A company proxy or any other endpoint — a base URL and a key',
             choice: 'custom',
@@ -1049,6 +1348,7 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
     )?.choice;
     if (!choice) return;
     if (choice === 'anthropic') return this.addAnthropicKey();
+    if (choice === 'codex') return this.addCodex();
     return this.addGateway(choice === 'custom' ? undefined : choice);
   }
 
@@ -1120,6 +1420,156 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
     }
 
     await this.offerNewProvider(added, key.trim(), found);
+  }
+
+  /**
+   * OpenAI Codex: GPT through the Codex CLI, for workers and agent tasks. A
+   * ChatGPT plan is used only by Codex itself (signed in with `codex login`); an
+   * API key reaches Codex's runs through their environment, never a file.
+   */
+  private async addCodex(): Promise<void> {
+    const bin = await codexBinary();
+    if (!bin) {
+      const pick = await vscode.window.showWarningMessage(
+        'OpenAI Codex runs through the Codex CLI, which isn\'t on this host: neither the OpenAI extension ' +
+          '(openai.chatgpt) nor `codex` on PATH was found. Install one, then add the provider again.',
+        { modal: true },
+        'Install with npm',
+        'Show the OpenAI extension'
+      );
+      if (pick === 'Install with npm') {
+        const t = vscode.window.createTerminal('Install Codex');
+        t.show();
+        t.sendText('npm install -g @openai/codex');
+      } else if (pick === 'Show the OpenAI extension') {
+        void vscode.commands.executeCommand('workbench.extensions.search', 'openai.chatgpt');
+      }
+      return;
+    }
+    const auth = (
+      await vscode.window.showQuickPick(
+        [
+          {
+            label: '$(account) ChatGPT plan',
+            description: "Codex's own sign-in (codex login)",
+            detail: "Counts toward your plan's Codex limits (5-hour and weekly) — shown in provider_usage",
+            auth: 'chatgpt' as CodexAuth,
+          },
+          {
+            label: '$(key) OpenAI API key',
+            description: 'platform.openai.com/api-keys',
+            detail: 'Billed per token to the key',
+            auth: 'api-key' as CodexAuth,
+          },
+        ],
+        { title: 'Add OpenAI Codex (1/2): how Codex signs in' }
+      )
+    )?.auth;
+    if (!auth) return;
+    const taken = (v: string) => this.list().some((p) => p.name === v.trim());
+    const suggested = auth === 'chatgpt' ? 'Codex' : 'Codex (API key)';
+    const name = await vscode.window.showInputBox({
+      title: 'Add OpenAI Codex (2/2): name',
+      prompt: "How workers on it are named (e.g. codex/gpt-6.1-sol) and shown in the account's hover",
+      value: taken(suggested) ? '' : suggested,
+      validateInput: (v) => (!v.trim() ? 'Enter a name' : taken(v) ? 'That name is taken' : undefined),
+    });
+    if (!name) return;
+    let key: string | undefined;
+    if (auth === 'api-key') {
+      key = (
+        await vscode.window.showInputBox({
+          title: 'OpenAI API key',
+          prompt: "From platform.openai.com/api-keys. Stored in VS Code's secret storage on this computer",
+          password: true,
+          ignoreFocusOut: true,
+          validateInput: (v) => (/^sk-\S{20,}$/.test(v.trim()) ? undefined : 'An OpenAI key starts with sk-'),
+        })
+      )?.trim();
+      if (!key) return;
+    }
+    let provider: Provider = { id: crypto.randomBytes(6).toString('hex'), name: name.trim(), kind: 'codex', codexAuth: auth, baseUrl: '', auth: 'bearer' };
+    if (key) await this.context.secrets.store(this.secretKey(provider.id), key);
+    await this.save([...this.list(), provider]);
+    log(`provider added: ${provider.name} (OpenAI Codex, ${auth}, ${bin})`);
+    if (!(await this.checkCodex(provider))) return;
+    provider = await this.refreshCodexModels(provider);
+    const updated = await this.pickWorkers(provider);
+    if (!updated) {
+      vscode.window.showInformationMessage(`Added ${provider.name}. Pick its workers any time under "Edit or Remove a Provider".`);
+      return;
+    }
+    await this.save(this.list().map((p) => (p.id === updated.id ? updated : p)));
+    this.onDidChange.fire();
+    const done = updated.workers?.length
+      ? `${updated.name}: workers ${updated.workers.join(', ')}. New Claude Code sessions get them.`
+      : `Added ${updated.name}, with no workers yet.`;
+    if (auth !== 'api-key' || !this.settingsFile()) {
+      vscode.window.showInformationMessage(done);
+      return;
+    }
+    // An API key can also serve chat windows, through the local proxy.
+    const pick = await vscode.window.showInformationMessage(`${done} It can also run Claude Code chat windows on GPT.`, 'Set up chat windows');
+    if (pick) await this.useInWindow(updated);
+  }
+
+  /**
+   * Tests a Codex provider and, for a ChatGPT plan that isn't signed in, offers
+   * Codex's own sign-in in a terminal (a device code in a remote window, where
+   * the browser runs elsewhere). True once it works.
+   */
+  private async checkCodex(p: Provider): Promise<boolean> {
+    for (;;) {
+      const ctx = await this.codexContext(p.id);
+      if (!ctx) {
+        vscode.window.showWarningMessage(`${p.name}: Codex isn't available — no \`codex\` on this host, or no stored API key.`);
+        return false;
+      }
+      const r = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: `Checking ${p.name}…` },
+        () => testCodex(ctx, ctx.env.CODEX_API_KEY)
+      );
+      if (r.ok) {
+        log(`provider ${p.name}: Codex OK — ${r.detail}`);
+        vscode.window.showInformationMessage(`${p.name}: ${r.detail}.`);
+        return true;
+      }
+      log(`provider ${p.name}: Codex check failed — ${r.message}`);
+      const actions = p.codexAuth === 'api-key' ? ['Replace key'] : ['Sign in to Codex', 'Check again'];
+      const pick = await vscode.window.showWarningMessage(`${p.name}: ${r.message}\n\n${r.hint}`, { modal: true }, ...actions);
+      if (pick === 'Sign in to Codex') {
+        const t = vscode.window.createTerminal({ name: 'Codex sign-in', env: { CODEX_HOME: ctx.home } });
+        t.show();
+        t.sendText(`"${ctx.bin}" login${vscode.env.remoteName ? ' --device-auth' : ''}`);
+        const next = await vscode.window.showInformationMessage(
+          `Finish signing in to Codex in the terminal${vscode.env.remoteName ? ' (open the link it shows and enter the code)' : ''}, then check again.`,
+          'Check again'
+        );
+        if (next !== 'Check again') return false;
+      } else if (pick === 'Replace key') {
+        const key = (
+          await vscode.window.showInputBox({ title: `OpenAI API key for ${p.name}`, password: true, ignoreFocusOut: true, validateInput: (v) => (/^sk-\S{20,}$/.test(v.trim()) ? undefined : 'An OpenAI key starts with sk-') })
+        )?.trim();
+        if (!key) return false;
+        await this.context.secrets.store(this.secretKey(p.id), key);
+      } else if (pick !== 'Check again') {
+        return false;
+      }
+    }
+  }
+
+  /** Reads the models Codex offers this account (its own catalog) into the provider. */
+  private async refreshCodexModels(p: Provider): Promise<Provider> {
+    const ctx = await this.codexContext(p.id);
+    if (!ctx) return p;
+    const [models, caps] = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: `Reading ${p.name}'s models…` },
+      () => Promise.all([codexModels(ctx), codexCapabilities(ctx)])
+    );
+    const updated: Provider = { ...p, codexModels: models, ...(caps && { codexImages: caps.imageGeneration }) };
+    await this.save(this.list().map((x) => (x.id === p.id ? updated : x)));
+    log(`provider ${p.name}: Codex models ${models.map((m) => m.id).join(', ')}`);
+    return updated;
   }
 
   private static validateAnthropicKey(v: string): string | undefined {
@@ -1219,6 +1669,141 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
     }
   }
 
+  /**
+   * GPT models for chat windows on an OpenAI API key: which appear in Claude
+   * Code's model picker, and which one it uses by default. Through the local
+   * LiteLLM proxy, billed to the key. Undefined when cancelled.
+   */
+  private async pickChatModels(target: Provider): Promise<Provider | undefined> {
+    const choices = target.codexModels?.length ? target.codexModels : CODEX_FALLBACK_MODELS;
+    const on = new Set(target.extraModels ?? []);
+    const picked = await vscode.window.showQuickPick(
+      choices.map((m) => ({ label: m.id, description: `${m.name} — ${m.note}`, picked: on.has(m.id) })),
+      {
+        title: `${target.name}: GPT models for chat windows`,
+        placeHolder: "Each appears in Claude Code's model picker. None selected = no chat windows on this provider.",
+        canPickMany: true,
+      }
+    );
+    if (!picked) return undefined;
+    const models = picked.map((i) => i.label);
+    const updated: Provider = { ...target, extraModels: models.length ? models : undefined };
+    if (models.length === 0) {
+      updated.models = undefined;
+      await stopProxy(target.id);
+      return updated;
+    }
+    if (on.size === 0) {
+      const ok = await vscode.window.showWarningMessage(
+        `Use GPT in Claude Code chat windows on ${target.name}?\n\n` +
+          `• A local LiteLLM proxy (installed on first use, hash-pinned, 127.0.0.1 only) translates Claude Code's ` +
+          `requests for OpenAI. Your API key stays in the proxy's memory.\n` +
+          `• Billed per token to this API key — not your ChatGPT plan.\n` +
+          `• Claude Code is built for Claude: GPT uses its tools, but less reliably.`,
+        { modal: true },
+        'Use GPT in chats'
+      );
+      if (ok !== 'Use GPT in chats') return undefined;
+    }
+    const current = codexSlots({ ...updated, models: target.models }).sonnet;
+    const main =
+      models.length === 1
+        ? models[0]
+        : (
+            await vscode.window.showQuickPick(
+              models.map((m) => ({ label: m, description: m === current ? 'current default' : undefined })),
+              { title: `${target.name}: default model for chats`, placeHolder: "Claude Code's default (its sonnet slot); opus and haiku get the closest enabled match" }
+            )
+          )?.label ?? current;
+    updated.models = codexSlots({ ...updated, models: { sonnet: main } });
+    updated.models.sonnet = main;
+    return updated;
+  }
+
+  /**
+   * Which of a provider's models the window's AI may consult, and which of those
+   * may also run agent tasks — each new one confirmed, saying what it means for
+   * this kind of provider. Undefined when cancelled.
+   */
+  private async pickWorkers(target: Provider): Promise<Provider | undefined> {
+    const updated: Provider = { ...target };
+    const codex = isCodex(target);
+    const choices = workerChoices(target);
+    if (choices.length === 0) {
+      vscode.window.showInformationMessage(`${target.name} has no models to offer as workers yet — set its model aliases first.`);
+      return undefined;
+    }
+    const on = new Set(target.workers ?? []);
+    const picked = await vscode.window.showQuickPick(
+      choices.map((c) => ({ label: c.model, description: c.note, picked: on.has(c.model) })),
+      {
+        title: `${target.name}: models this window's AI may consult as workers`,
+        placeHolder: 'Workers only answer — they cannot read files or run commands. None selected = off.',
+        canPickMany: true,
+      }
+    );
+    if (!picked) return undefined;
+    const models = picked.map((i) => i.label);
+    const adding = models.filter((m) => !on.has(m));
+    if (adding.length > 0) {
+      const billing = codex
+        ? target.codexAuth === 'api-key'
+          ? 'OpenAI, billed to this API key'
+          : "OpenAI, counted toward your ChatGPT plan's Codex limits"
+        : `${target.name}${isNative(target) ? '' : " and the model's maker"}, billed to this key`;
+      const ok = await vscode.window.showWarningMessage(
+        `Let Claude Code in this account's windows send work to ${target.name} (${adding.join(', ')})?\n\n` +
+          `• The AI decides what to send: the task and the code or text it pastes in — that content goes to ${billing}.\n` +
+          (codex
+            ? '• Each call runs Codex itself, headless, read-only in an empty folder, with its shell and other tools off: it only answers.\n'
+            : '• Workers only answer. They cannot read your files or run commands.\n') +
+          `• Off again any time here; the window log records each call (not its content).`,
+        { modal: true },
+        'Allow'
+      );
+      if (ok !== 'Allow') return undefined;
+    }
+    updated.workers = models.length > 0 ? models : undefined;
+    // Agent tasks: a separate, stronger opt-in among the enabled workers.
+    const agentOn = new Set((target.agentWorkers ?? []).filter((m) => models.includes(m)));
+    if (models.length === 0) {
+      updated.agentWorkers = undefined;
+      return updated;
+    }
+    const agentPick = await vscode.window.showQuickPick(
+      models.map((m) => ({ label: m, picked: agentOn.has(m) })),
+      {
+        title: `${target.name}: which of these may also run AGENT TASKS?`,
+        placeHolder: codex
+          ? 'Agent tasks run Codex on this model in a scratch git worktree, with edits and commands (its sandbox, approvals reviewed automatically). None = answers only.'
+          : 'Agent tasks run Claude Code on this model in a scratch git worktree, with edits and commands (auto mode). None = answers only.',
+        canPickMany: true,
+      }
+    );
+    const agents = (agentPick ?? []).map((i) => i.label);
+    const newAgents = agents.filter((m) => !agentOn.has(m));
+    if (newAgents.length > 0) {
+      const ok = await vscode.window.showWarningMessage(
+        `Let ${target.name} (${newAgents.join(', ')}) run agent tasks?\n\n` +
+          (codex
+            ? `• Codex runs on that model, headless, in a git worktree made from your repo (HEAD + uncommitted ` +
+              `changes). It reads and edits files there and runs commands in its sandbox: writes only inside the ` +
+              `worktree, no network for commands. Its approval requests are reviewed automatically (--approve-for-me).\n`
+            : `• Claude Code runs on that model, headless, in a git worktree made from your repo (HEAD + ` +
+              `uncommitted changes). It reads and edits files there and runs commands — on this machine.\n` +
+              `• Auto mode checks each consequential action with a safety classifier on that same model ` +
+              `(about 35K tokens per check).\n`) +
+          `• Nothing reaches your working tree unless the lead applies the diff. The repo content it reads goes to ` +
+          `${codex ? 'OpenAI' : target.name}. Limits: 2 at a time, 2 hours each by default.`,
+        { modal: true },
+        'Allow agent tasks'
+      );
+      if (ok !== 'Allow agent tasks') agents.splice(0, agents.length, ...[...agentOn]);
+    }
+    updated.agentWorkers = agentPick === undefined ? [...agentOn] : agents.length > 0 ? agents : undefined;
+    return updated;
+  }
+
   async editInteractive(): Promise<void> {
     const providers = this.list();
     const LOGIN = '__login__';
@@ -1232,7 +1817,7 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
         },
         ...providers.map((p) => ({
           label: p.name,
-          description: isNative(p) ? 'Anthropic API key' : p.preset ? PRESETS[p.preset].label : p.baseUrl,
+          description: describeKind(p),
           provider: p as Provider | undefined,
           id: p.id,
         })),
@@ -1244,7 +1829,7 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
     const target = chosen.provider;
     if (!target) return;
 
-    type Action = 'test' | 'workers' | 'key' | 'url' | 'auth' | 'models' | 'others' | 'refresh' | 'proxylog' | 'betas' | 'rename' | 'remove';
+    type Action = 'test' | 'workers' | 'key' | 'url' | 'auth' | 'models' | 'others' | 'refresh' | 'proxylog' | 'betas' | 'rename' | 'remove' | 'signin' | 'codexmodels' | 'chatmodels';
     type ActionItem = vscode.QuickPickItem & { action: Action };
     const common = (items: ActionItem[]): ActionItem[] => [
       { label: '$(pulse) Test connection', description: 'one tiny request, as Claude Code sends it', action: 'test' },
@@ -1263,7 +1848,38 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
     ];
     const action = (
       await vscode.window.showQuickPick<ActionItem>(
-        isNative(target)
+        isCodex(target)
+          ? [
+              { label: '$(pulse) Test connection', description: target.codexAuth === 'api-key' ? 'checks the API key' : 'who Codex is signed in as', action: 'test' },
+              {
+                label: '$(organization) Workers',
+                description: target.workers?.length
+                  ? target.workers.map((m) => (target.agentWorkers?.includes(m) ? `${m} (+agent)` : m)).join(', ')
+                  : 'off',
+                detail: "Let this window's AI consult Codex, or have it run agent tasks",
+                action: 'workers',
+              },
+              {
+                label: '$(refresh) Refresh model list',
+                description: `${(target.codexModels ?? CODEX_FALLBACK_MODELS).length} models`,
+                action: 'codexmodels',
+              },
+              ...(target.codexAuth === 'api-key'
+                ? [
+                    {
+                      label: '$(comment-discussion) Chat-window models',
+                      description: target.extraModels?.length ? `${target.extraModels.length} enabled — ${describeModels({ ...target, models: codexSlots(target) })}` : 'off',
+                      detail: 'GPT in Claude Code chat windows, through the local LiteLLM proxy — billed to the key',
+                      action: 'chatmodels' as Action,
+                    },
+                    ...(target.extraModels?.length ? [{ label: '$(output) Show proxy log', action: 'proxylog' as Action }] : []),
+                    { label: '$(key) Replace key', action: 'key' as Action },
+                  ]
+                : [{ label: '$(account) Sign in to Codex', description: 'codex login, in a terminal', action: 'signin' as Action }]),
+              { label: '$(edit) Rename', action: 'rename' },
+              { label: '$(trash) Remove', action: 'remove' },
+            ]
+          : isNative(target)
           ? common([])
           : common([
           // A preset's endpoint and key header are what the preset is; only a custom gateway changes them.
@@ -1321,70 +1937,29 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
     const updated: Provider = { ...target };
     switch (action) {
       case 'workers': {
-        const choices = workerChoices(target);
-        if (choices.length === 0) {
-          vscode.window.showInformationMessage(`${target.name} has no models to offer as workers yet — set its model aliases first.`);
-          return;
-        }
-        const on = new Set(target.workers ?? []);
-        const picked = await vscode.window.showQuickPick(
-          choices.map((c) => ({ label: c.model, description: c.note, picked: on.has(c.model) })),
-          {
-            title: `${target.name}: models this window's AI may consult as workers`,
-            placeHolder: 'Workers only answer — they cannot read files or run commands. None selected = off.',
-            canPickMany: true,
-          }
-        );
+        const picked = await this.pickWorkers(target);
         if (!picked) return;
-        const models = picked.map((i) => i.label);
-        const adding = models.filter((m) => !on.has(m));
-        if (adding.length > 0) {
-          const ok = await vscode.window.showWarningMessage(
-            `Let Claude Code in this account's windows send work to ${target.name} (${adding.join(', ')})?\n\n` +
-              `• The AI decides what to send: the task and the code or text it pastes in — that content goes to ` +
-              `${target.name}${isNative(target) ? '' : ' and the model\'s maker'}, billed to this key.\n` +
-              `• Workers only answer. They cannot read your files or run commands.\n` +
-              `• Off again any time here; the window log records each call (not its content).`,
-            { modal: true },
-            'Allow'
-          );
-          if (ok !== 'Allow') return;
-        }
-        updated.workers = models.length > 0 ? models : undefined;
-        // Agent tasks: a separate, stronger opt-in among the enabled workers.
-        const agentOn = new Set((target.agentWorkers ?? []).filter((m) => models.includes(m)));
-        if (models.length > 0) {
-          const agentPick = await vscode.window.showQuickPick(
-            models.map((m) => ({ label: m, picked: agentOn.has(m) })),
-            {
-              title: `${target.name}: which of these may also run AGENT TASKS?`,
-              placeHolder:
-                'Agent tasks run Claude Code on this model in a scratch git worktree, with edits and commands (auto mode). None = answers only.',
-              canPickMany: true,
-            }
-          );
-          const agents = (agentPick ?? []).map((i) => i.label);
-          const newAgents = agents.filter((m) => !agentOn.has(m));
-          if (newAgents.length > 0) {
-            const ok = await vscode.window.showWarningMessage(
-              `Let ${target.name} (${newAgents.join(', ')}) run agent tasks?\n\n` +
-                `• Claude Code runs on that model, headless, in a git worktree made from your repo (HEAD + ` +
-                `uncommitted changes). It reads and edits files there and runs commands — on this machine.\n` +
-                `• Auto mode checks each consequential action with a safety classifier on that same model ` +
-                `(about 35K tokens per check). Nothing reaches your working tree unless the lead applies the diff.\n` +
-                `• The repo content it reads goes to ${target.name}. Limits: 2 at a time, 80 turns, 30 minutes.`,
-              { modal: true },
-              'Allow agent tasks'
-            );
-            if (ok !== 'Allow agent tasks') agents.splice(0, agents.length, ...[...agentOn]);
-          }
-          updated.agentWorkers = agentPick === undefined ? [...agentOn] : agents.length > 0 ? agents : undefined;
-        } else {
-          updated.agentWorkers = undefined;
-        }
+        Object.assign(updated, { workers: picked.workers, agentWorkers: picked.agentWorkers });
         break;
       }
+      case 'signin':
+        await this.checkCodex(target);
+        return;
+      case 'chatmodels': {
+        const picked = await this.pickChatModels(target);
+        if (!picked) return;
+        Object.assign(updated, { extraModels: picked.extraModels, models: picked.models });
+        break;
+      }
+      case 'codexmodels':
+        await this.refreshCodexModels(target);
+        vscode.window.showInformationMessage(`${target.name}: model list refreshed.`);
+        return;
       case 'test': {
+        if (isCodex(target)) {
+          await this.checkCodex(target);
+          return;
+        }
         const key = await this.context.secrets.get(this.secretKey(target.id));
         if (!key) throw new Error(`No key is stored for ${target.name}. Replace its key first.`);
         const r = await this.testInteractive(target, key);
@@ -1398,7 +1973,9 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
           ignoreFocusOut: true,
           validateInput: isNative(target)
             ? ProviderManager.validateAnthropicKey
-            : (v) => (v.trim() ? undefined : 'Enter the key'),
+            : isCodex(target)
+              ? (v) => (/^sk-\S{20,}$/.test(v.trim()) ? undefined : 'An OpenAI key starts with sk-')
+              : (v) => (v.trim() ? undefined : 'Enter the key'),
         });
         if (!key) return;
         await this.context.secrets.store(this.secretKey(target.id), key.trim());
@@ -1528,6 +2105,9 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
         await this.save(this.list().filter((p) => p.id !== target.id));
         await this.context.secrets.delete(this.secretKey(target.id));
         await stopProxy(target.id);
+        if (isCodex(target) && target.codexAuth === 'api-key') {
+          fs.rmSync(path.join(workingRoot(), 'codex', target.id), { recursive: true, force: true });
+        }
         log(`provider removed: ${target.name}`);
         // This window used it: back to the Anthropic login now. Other windows find
         // it gone on their next sync (focus) and offer the reload themselves.
@@ -1544,7 +2124,7 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
     this.onDidChange.fire();
     // Turning other models on is the moment to install and start the proxy — the
     // background sync below never installs anything on its own.
-    if (action === 'others' && updated.extraModels?.length) {
+    if ((action === 'others' || action === 'chatmodels') && updated.extraModels?.length) {
       const key = await this.context.secrets.get(this.secretKey(updated.id));
       if (key && !(await this.proxyFor(updated, key, true))) {
         vscode.window.showInformationMessage(
@@ -1553,7 +2133,13 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
       }
     }
     if (this.active()?.id === target.id) await this.sync();
-    else vscode.window.showInformationMessage(`Updated ${updated.name}.`);
+    else if (action === 'chatmodels' && updated.extraModels?.length && this.settingsFile()) {
+      const pick = await vscode.window.showInformationMessage(
+        `${updated.name}: chat windows can use ${updated.extraModels.join(', ')}.`,
+        'Use in this window'
+      );
+      if (pick) await this.useInWindow(updated);
+    } else vscode.window.showInformationMessage(`Updated ${updated.name}.`);
   }
 
   dispose(): void {

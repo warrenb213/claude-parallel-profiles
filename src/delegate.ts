@@ -7,7 +7,9 @@ import { spawn } from 'child_process';
 import { claudeShellArgs } from './cli';
 import { log } from './log';
 import { TASK_LIMITS, type AgentTasks } from './agentTasks';
-import { UsageBook, zaiQuota, fromRateLimitInfo } from './usage';
+import { UsageBook, zaiQuota, fromRateLimitInfo, claudeCodeUsage } from './usage';
+import { callCodexWorker, CodexContext, codexUsage } from './codex';
+import { candidates, CATALOG, clampEffort, Effort, effectivePolicy, roleDef, RolePolicy, Skip, THINKING_BUDGET, worthFallingBack } from './roles';
 
 /**
  * Workers: other models the window's AI can consult — "Claude leads, others help".
@@ -43,10 +45,17 @@ export interface Worker {
   /**
    * 'login': Claude on the window's own Anthropic login — run as headless Claude
    * Code on the account's directory (callLoginWorker), never with its token here.
+   * 'codex': GPT through the Codex CLI (codex.ts), on a ChatGPT plan or an API key.
    */
-  kind?: 'login';
+  kind?: 'login' | 'codex';
   /** The provider's preset, for usage lookups (e.g. 'zai'). */
   preset?: string;
+  /** On a subscription (the Anthropic login, a Coding Plan, a ChatGPT plan) rather than billed per token. */
+  plan?: boolean;
+  /** Codex: the reasoning efforts the model takes. */
+  efforts?: string[];
+  /** Codex: the account can generate images (2D art). */
+  images?: boolean;
 }
 
 export interface WorkerSource {
@@ -54,6 +63,12 @@ export interface WorkerSource {
   keyFor(providerId: string): Promise<string | undefined>;
   /** The account's own Claude Code directory (its store — never a window's working dir, which may carry a gateway). */
   loginDir(): string | undefined;
+  /** How to run Codex for a Codex provider; undefined when it can't (no binary, no key). */
+  codexContext(providerId: string): Promise<CodexContext | undefined>;
+  /** The roles the user set (orchestration panel); undefined = the template. */
+  rolePolicy(): RolePolicy | undefined;
+  /** This account's Claude Code directories and email — where Claude Code caches its plan usage. */
+  claudeUsageDirs(): { dirs: string[]; email?: string };
   readonly onDidChange: vscode.EventEmitter<void>;
 }
 
@@ -97,7 +112,8 @@ export async function callWorker(
   key: string,
   task: string,
   context: string | undefined,
-  maxTokens: number
+  maxTokens: number,
+  effort?: Effort
 ): Promise<{ text: string; inputTokens?: number; outputTokens?: number; ms: number }> {
   const url = `${w.baseUrl.replace(/\/+$/, '')}/v1/messages`;
   const headers: Record<string, string> = { 'content-type': 'application/json', 'anthropic-version': '2023-06-01' };
@@ -124,7 +140,15 @@ export async function callWorker(
   };
   const textOf = (b: Reply) =>
     (b.content ?? []).filter((c) => c.type === 'text' && typeof c.text === 'string').map((c) => c.text).join('\n').trim();
-  let body = await send({ max_tokens: maxTokens + THINKING_HEADROOM });
+  // Effort, on the Messages API, is the thinking budget; unset, the model's own default (GLM thinks).
+  const budget = effort ? THINKING_BUDGET[effort] : undefined;
+  let body = await send(
+    budget === undefined
+      ? { max_tokens: maxTokens + THINKING_HEADROOM }
+      : budget === 0
+        ? { max_tokens: maxTokens, thinking: { type: 'disabled' } }
+        : { max_tokens: maxTokens + budget, thinking: { type: 'enabled', budget_tokens: budget } }
+  );
   let inTok = body.usage?.input_tokens ?? 0;
   let outTok = body.usage?.output_tokens ?? 0;
   if (!textOf(body) && body.stop_reason === 'max_tokens') {
@@ -147,11 +171,13 @@ export function callLoginWorker(
   w: Worker,
   accountDir: string,
   task: string,
-  context: string | undefined
+  context: string | undefined,
+  effort?: Effort
 ): Promise<{ text: string; inputTokens?: number; outputTokens?: number; ms: number; rateLimit?: Record<string, unknown> }> {
   const content = context ? `${task}\n\n<context>\n${context}\n</context>` : task;
   const args = [
     '-p', content, '--model', w.model, '--system-prompt', WORKER_SYSTEM, '--tools', '',
+    ...(effort ? ['--effort', effort] : []),
     '--strict-mcp-config', '--no-session-persistence', '--output-format', 'stream-json', '--verbose',
     // Belt and braces: the official endpoint and no provider key, whatever settings are around.
     '--settings', JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://api.anthropic.com', ANTHROPIC_AUTH_TOKEN: '', ANTHROPIC_API_KEY: '' } }),
@@ -220,6 +246,9 @@ export interface Consult {
   ms?: number;
   inTok?: number;
   outTok?: number;
+  /** Asked for by role (roles.ts), and the effort it ran at. */
+  role?: string;
+  effort?: string;
 }
 
 const KEEP_CONSULTS = 50;
@@ -356,7 +385,9 @@ export class DelegateServer implements vscode.Disposable {
           instructions:
             'Other AI models (workers) the user enabled. `delegate` asks one a question (answers only). ' +
             'Where enabled, start_task runs one as an agent on a scratch worktree of the repo and returns a ' +
-            'diff via wait_task; review it before apply_task_changes. Check workers\' output before relying on it.',
+            'diff via wait_task; review it before apply_task_changes. Ask by `role` (list_roles: quick, ' +
+            'second-opinion, review, hard-reasoning, implement, test-and-fix, vector-art, 2d-art) so the user\'s ' +
+            'choice of model, effort and fallbacks applies. Check workers\' output before relying on it.',
         });
       case 'ping':
         return reply({});
@@ -381,6 +412,15 @@ export class DelegateServer implements vscode.Disposable {
     const ids = this.source.workers().map((w) => w.id);
     const all: Json[] = [
       {
+        name: 'list_roles',
+        description:
+          "The user's roles, by category (answers, build, art): what each kind of work is for and which models serve it, " +
+          'in fallback order, as of now. Prefer `role` over `worker` in delegate and start_task: the extension then ' +
+          'picks the model the user chose for that work, at its effort, and falls back when a plan is used up or a ' +
+          'provider fails.',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
         name: 'list_workers',
         description: 'List the worker models the user enabled, with what each is good for.',
         inputSchema: { type: 'object', properties: {} },
@@ -398,7 +438,11 @@ export class DelegateServer implements vscode.Disposable {
           properties: {
             // No enum: a session keeps the tool definitions it started with, so a list here
             // would go stale when the user changes workers. list_workers is always current.
-            worker: { type: 'string', description: `Which worker — see list_workers (at session start: ${ids.join(', ')}).` },
+            role: {
+              type: 'string',
+              description: 'The kind of work — quick, second-opinion, review, hard-reasoning (see list_roles). Preferred: the user chose who serves each.',
+            },
+            worker: { type: 'string', description: `A specific worker instead of a role — see list_workers (at session start: ${ids.join(', ')}).` },
             task: { type: 'string', description: 'What to do, stated completely.' },
             context: { type: 'string', description: 'The material to work on: code, text, notes.' },
             max_tokens: {
@@ -408,7 +452,7 @@ export class DelegateServer implements vscode.Disposable {
               description: `Answer length cap (default ${DEFAULT_OUTPUT_TOKENS}).`,
             },
           },
-          required: ['worker', 'task'],
+          required: ['task'],
         },
       },
       {
@@ -432,9 +476,10 @@ export class DelegateServer implements vscode.Disposable {
       {
         name: 'start_task',
         description:
-          'Start an agent task: a worker model (another provider the user enabled) runs Claude Code headless on a ' +
-          "scratch git worktree of this repo — HEAD plus the user's uncommitted changes — with auto-mode tool use " +
-          '(edits, commands checked by a safety classifier). It can consult other workers itself, answers only ' +
+          'Start an agent task: a worker model (another provider the user enabled) runs headless on a scratch git ' +
+          "worktree of this repo — HEAD plus the user's uncommitted changes — editing files and running commands: " +
+          'Claude Code in auto mode (actions checked by a safety classifier), or for Codex workers Codex itself in its ' +
+          'workspace-write sandbox (no network for commands). It can consult other workers itself, answers only ' +
           "(e.g. Claude on the user's subscription). Returns a task_id at once; tasks take minutes. The worker " +
           'sees only its copy and what you put in task/context: gitignored files (scratch folders, build output) ' +
           'are not in it unless listed in `include` — or named in task/context by absolute path, which copies ' +
@@ -442,7 +487,12 @@ export class DelegateServer implements vscode.Disposable {
         inputSchema: {
           type: 'object',
           properties: {
-            worker: { type: 'string', description: `An agent-enabled worker — see list_workers (at session start: ${ids.join(', ')}).` },
+            role: {
+              type: 'string',
+              description:
+                'The kind of work — implement, test-and-fix, vector-art, 2d-art (raster images via Codex; ask for the files to be saved in the repo) — see list_roles. Preferred.',
+            },
+            worker: { type: 'string', description: `A specific agent-enabled worker instead of a role — see list_workers (at session start: ${ids.join(', ')}).` },
             task: { type: 'string', description: 'The job, stated completely, with how to verify it.' },
             context: { type: 'string', description: 'Anything it needs beyond the repo itself.' },
             include: {
@@ -472,7 +522,7 @@ export class DelegateServer implements vscode.Disposable {
                 'Applying a chained task also applies the unapplied tasks before it.',
             },
           },
-          required: ['worker', 'task'],
+          required: ['task'],
         },
       },
       {
@@ -501,15 +551,8 @@ export class DelegateServer implements vscode.Disposable {
   /** Refreshes what can be read without spending anything (Z.ai's monitor), then formats the book. */
   async usageReport(): Promise<string> {
     const ws = this.source.workers();
-    for (const w of ws) {
-      if (w.preset !== 'zai') continue;
-      const e = this.usage.get(w.providerName);
-      if (e && Date.now() - e.at < 60_000) continue;
-      const key = await this.source.keyFor(w.providerId);
-      const q = key ? await zaiQuota(key) : undefined;
-      if (q) this.usage.set(w.providerName, q);
-    }
-    return this.usage.format([...new Set(ws.map((w) => w.providerName))]);
+    await this.refreshUsage();
+    return this.usage.format([...new Set([LOGIN_PROVIDER, ...ws.map((w) => w.providerName)])]);
   }
 
   private async call(name: string, args: Json, caller: 'lead' | 'agent' = 'lead'): Promise<Json> {
@@ -523,11 +566,11 @@ export class DelegateServer implements vscode.Disposable {
       try {
         const id = String(args.task_id ?? '');
         if (name === 'start_task') {
-          const w = this.source.workers().find((x) => x.id === args.worker && x.agent);
-          if (!w) {
-            const agentIds = this.source.workers().filter((x) => x.agent).map((x) => x.id);
-            return text(`No worker "${String(args.worker)}" enabled for agent tasks. Enabled now: ${agentIds.join(', ') || 'none'}.`, true);
-          }
+          const routed = await this.route(args, 'agent');
+          if ('error' in routed) return text(routed.error, true);
+          // A task is long: it starts on the first entry that can run now (no retry mid-run).
+          const { worker: w, effort } = routed.order[0];
+          const passed = routed.skipped.map((x) => `${x.worker} skipped: ${x.reason}`);
           const task = typeof args.task === 'string' ? args.task.trim() : '';
           if (!task) return text('`task` is required.', true);
           const context = typeof args.context === 'string' ? args.context : undefined;
@@ -538,13 +581,16 @@ export class DelegateServer implements vscode.Disposable {
             context,
             after,
             include,
+            role: routed.role,
+            effort,
             minutes: typeof args.minutes === 'number' ? args.minutes : undefined,
             maxTurns: typeof args.max_turns === 'number' ? args.max_turns : undefined,
           });
           return text(
             `${r.queued ? 'Queued' : 'Started'} task ${r.id} on ${w.id}${after ? `, building on ${after}` : ''}` +
               `${r.queued ? (after ? ` — it starts when ${after} is done` : ' — it starts when a slot frees') : ''}. ` +
-              `Call wait_task with task_id "${r.id}" for its result.${r.note ? `\n\nSnapshot: ${r.note}` : ''}`
+              `${routed.role ? ` Role ${routed.role}${effort ? `, effort ${effort}` : ''}${passed.length ? ` (${passed.join('; ')})` : ''}.` : ''}` +
+              ` Call wait_task with task_id "${r.id}" for its result.${r.note ? `\n\nSnapshot: ${r.note}` : ''}`
           );
         }
         if (name === 'wait_task') {
@@ -558,32 +604,121 @@ export class DelegateServer implements vscode.Disposable {
         return text((err as Error).message, true);
       }
     }
+    if (name === 'list_roles') return text(await this.rolesReport());
     if (name !== 'delegate') return text(`Unknown tool ${name}.`, true);
-    const w = this.source.workers().find((x) => x.id === args.worker);
-    if (!w) {
-      return text(`No enabled worker "${String(args.worker)}". Enabled now: ${this.source.workers().map((x) => x.id).join(', ') || 'none'}.`, true);
-    }
     const task = typeof args.task === 'string' ? args.task.trim() : '';
     const context = typeof args.context === 'string' ? args.context : undefined;
     if (!task) return text('`task` is required.', true);
     if ((context?.length ?? 0) + task.length > MAX_CONTEXT_CHARS) {
       return text(`Too much to send: ${(context?.length ?? 0) + task.length} characters (limit ${MAX_CONTEXT_CHARS}). Send only what the task needs.`, true);
     }
-    if (this.calls >= MAX_CALLS) return text(`This window reached its limit of ${MAX_CALLS} worker calls; reload the window to reset it.`, true);
     const maxTokens = Math.min(Math.max(Number(args.max_tokens) || DEFAULT_OUTPUT_TOKENS, 64), MAX_OUTPUT_TOKENS);
+    const routed = await this.route(args, 'answer');
+    if ('error' in routed) return text(routed.error, true);
+    const notes = routed.skipped.map((s) => `${s.worker} skipped: ${s.reason}`);
+    for (let i = 0; i < routed.order.length; i++) {
+      const { worker: w, effort } = routed.order[i];
+      const r = await this.consultOnce(w, effort, task, context, maxTokens, caller, routed.role);
+      if ('answer' in r) {
+        const via = routed.role ? ` · role ${routed.role}${effort ? `, effort ${effort}` : ''}` : '';
+        return text(`${r.answer || '(empty answer)'}\n\n— ${w.id}${via} · ${r.meta}${notes.length ? `\n(${notes.join('; ')})` : ''}`);
+      }
+      notes.push(`${w.id} failed: ${r.error}`);
+      if (!routed.role || i === routed.order.length - 1 || !worthFallingBack(r.error)) {
+        return text(`Worker ${w.id} failed: ${r.error}${notes.length > 1 ? `\n(${notes.slice(0, -1).join('; ')})` : ''}`, true);
+      }
+      log(`workers: role ${routed.role}: ${w.id} failed (${r.error.slice(0, 120)}), falling back to ${routed.order[i + 1].worker.id}`);
+    }
+    return text('No worker could serve it.', true);
+  }
+
+  /**
+   * Who serves a call: the worker named, or — for a `role` — its chain in the
+   * order it would be tried now (roles.ts), with the entries passed over and why.
+   */
+  private async route(
+    args: Json,
+    kind: 'answer' | 'agent'
+  ): Promise<{ order: Array<{ worker: Worker; effort?: Effort }>; skipped: Skip[]; role?: string } | { error: string }> {
+    const ws = this.source.workers();
+    const roleId = typeof args.role === 'string' && args.role.trim() ? args.role.trim() : undefined;
+    if (!roleId) {
+      const w = ws.find((x) => x.id === args.worker && (kind === 'answer' || x.agent));
+      if (!w) {
+        const ids = ws.filter((x) => kind === 'answer' || x.agent).map((x) => x.id);
+        return { error: `No ${kind === 'agent' ? 'agent-task ' : ''}worker "${String(args.worker ?? '')}". Pass \`role\` (see list_roles) or one of: ${ids.join(', ') || 'none'}.` };
+      }
+      return { order: [{ worker: w }], skipped: [] };
+    }
+    const def = roleDef(roleId);
+    if (!def) return { error: `No role "${roleId}". Roles: ${CATALOG.map((r) => r.id).join(', ')}.` };
+    if ((def.kind === 'answer') !== (kind === 'answer')) {
+      return { error: `Role "${roleId}" is for ${def.kind === 'answer' ? 'delegate' : 'start_task'}.` };
+    }
+    await this.refreshUsage();
+    const unavailable = await this.unavailable(ws);
+    const r = candidates(this.policy(), roleId, ws, (p) => this.usage.get(p), (w) => unavailable.get(w.id));
+    if (!r) return { error: `Role "${roleId}" is turned off.` };
+    if (r.order.length === 0) {
+      return {
+        error:
+          `No worker can serve role "${roleId}" now` +
+          (r.skipped.length ? `: ${r.skipped.map((s) => `${s.worker} — ${s.reason}`).join('; ')}` : ' — its chain is empty (Claude Accounts: Orchestration).'),
+      };
+    }
+    return { ...r, role: roleId };
+  }
+
+  /** The user's roles, or the template from the configured workers. */
+  policy(): RolePolicy {
+    return effectivePolicy(this.source.rolePolicy(), this.source.workers());
+  }
+
+  /** Why a worker can't run here right now (no key, no Codex, no account dir) — absent when it can. */
+  async unavailable(ws: Worker[]): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    const codex = new Map<string, boolean>();
+    for (const w of ws) {
+      if (w.kind === 'login') {
+        if (!this.source.loginDir()) out.set(w.id, "this window's account has no directory of its own");
+      } else if (w.kind === 'codex') {
+        if (!codex.has(w.providerId)) codex.set(w.providerId, Boolean(await this.source.codexContext(w.providerId)));
+        if (!codex.get(w.providerId)) out.set(w.id, 'Codex not available (no `codex` on this host, or no key)');
+      } else if (!(await this.source.keyFor(w.providerId))) {
+        out.set(w.id, `no key stored for ${w.providerName}`);
+      }
+    }
+    return out;
+  }
+
+  /** One consultation on one worker, with its bookkeeping (transcript, usage, log). */
+  private async consultOnce(
+    w: Worker,
+    effort: Effort | undefined,
+    task: string,
+    context: string | undefined,
+    maxTokens: number,
+    caller: 'lead' | 'agent',
+    role?: string
+  ): Promise<{ answer: string; meta: string } | { error: string }> {
+    if (this.calls >= MAX_CALLS) return { error: `this window reached its limit of ${MAX_CALLS} worker calls; reload the window to reset it` };
     let run: () => Promise<{ text: string; inputTokens?: number; outputTokens?: number; ms: number; rateLimit?: Record<string, unknown> }>;
     if (w.kind === 'login') {
       const dir = this.source.loginDir();
-      if (!dir) return text("This window's account has no directory of its own to run Claude on.", true);
-      run = () => callLoginWorker(w, dir, task, context);
+      if (!dir) return { error: "this window's account has no directory of its own to run Claude on" };
+      run = () => callLoginWorker(w, dir, task, context, effort);
+    } else if (w.kind === 'codex') {
+      const ctx = await this.source.codexContext(w.providerId);
+      if (!ctx) return { error: `Codex isn't available for ${w.providerName}: no \`codex\` on this host, or no stored API key` };
+      run = () => callCodexWorker(ctx, w.model, WORKER_SYSTEM, task, context, CALL_TIMEOUT_MS, clampEffort(effort, w.efforts));
     } else {
       const key = await this.source.keyFor(w.providerId);
-      if (!key) return text(`No key is stored for ${w.providerName}.`, true);
-      run = () => callWorker(w, key, task, context, maxTokens);
+      if (!key) return { error: `no key is stored for ${w.providerName}` };
+      run = () => callWorker(w, key, task, context, maxTokens, effort);
     }
     this.calls++;
     const busy = vscode.window.setStatusBarMessage(`$(sync~spin) Worker ${w.id}…`);
-    const consult: Consult = { n: this.calls, worker: w.id, caller, at: Date.now(), task, context };
+    const consult: Consult = { n: this.calls, worker: w.id, caller, at: Date.now(), task, context, role, effort };
     this.consults.push(consult);
     if (this.consults.length > KEEP_CONSULTS) this.consults.shift();
     this.onDidConsult.fire(consult);
@@ -595,16 +730,68 @@ export class DelegateServer implements vscode.Disposable {
         if (windows.length) this.usage.set(w.providerName, { windows, source: "Claude Code's rate-limit report", at: Date.now() });
       }
       this.usage.count(w.id, 'call', r.inputTokens, r.outputTokens);
-      log(`workers: ${w.id} answered${caller === 'agent' ? ' an agent task' : ''} in ${r.ms} ms (${r.inputTokens ?? '?'} in / ${r.outputTokens ?? '?'} out tokens)`);
-      return text(`${r.text || '(empty answer)'}\n\n— ${w.id} · ${r.ms} ms · ${r.inputTokens ?? '?'} in / ${r.outputTokens ?? '?'} out tokens`);
+      log(`workers: ${w.id} answered${caller === 'agent' ? ' an agent task' : ''}${role ? ` (role ${role})` : ''} in ${r.ms} ms (${r.inputTokens ?? '?'} in / ${r.outputTokens ?? '?'} out tokens)`);
+      return { answer: r.text, meta: `${r.ms} ms · ${r.inputTokens ?? '?'} in / ${r.outputTokens ?? '?'} out tokens` };
     } catch (err) {
       consult.error = (err as Error).message;
       log(`workers: ${w.id} failed — ${(err as Error).message}`);
-      return text(`Worker ${w.id} failed: ${(err as Error).message}`, true);
+      return { error: (err as Error).message };
     } finally {
       busy.dispose();
       this.onDidConsult.fire(consult);
     }
+  }
+
+  /** Plan usage, freshened when older than five minutes (or now, with `force`) — Codex and Z.ai can be read any time. */
+  async refreshUsage(force = false): Promise<void> {
+    // The Anthropic plan: Claude Code's own cached report, whenever it's fresher than what we have.
+    const { dirs, email } = this.source.claudeUsageDirs();
+    const cc = claudeCodeUsage(dirs, email);
+    const had = this.usage.get(LOGIN_PROVIDER);
+    if (cc && (!had || cc.at > had.at)) this.usage.set(LOGIN_PROVIDER, cc);
+    const seen = new Set<string>();
+    for (const w of this.source.workers()) {
+      if ((w.preset !== 'zai' && w.kind !== 'codex') || seen.has(w.providerId)) continue;
+      seen.add(w.providerId);
+      const e = this.usage.get(w.providerName);
+      if (e && !force && Date.now() - e.at < 300_000) continue;
+      if (w.kind === 'codex') {
+        const ctx = await this.source.codexContext(w.providerId);
+        const u = ctx ? await codexUsage(ctx) : undefined;
+        if (u) this.usage.set(w.providerName, u);
+      } else {
+        const key = await this.source.keyFor(w.providerId);
+        const q = key ? await zaiQuota(key) : undefined;
+        if (q) this.usage.set(w.providerName, q);
+      }
+    }
+  }
+
+  /** list_roles: each role, what it's for, and who would serve it now, in order. */
+  async rolesReport(): Promise<string> {
+    const ws = this.source.workers();
+    await this.refreshUsage();
+    const unavailable = await this.unavailable(ws);
+    const policy = this.policy();
+    const lines: string[] = [];
+    let category = '';
+    for (const def of CATALOG) {
+      if (def.category !== category) {
+        category = def.category;
+        lines.push(`${category}:`);
+      }
+      const role = policy.roles.find((r) => r.id === def.id);
+      if (role?.off) continue;
+      const r = candidates(policy, def.id, ws, (p) => this.usage.get(p), (w) => unavailable.get(w.id));
+      const order = r?.order.map((c) => `${c.worker.id}${c.effort ? ` (${c.effort})` : ''}`) ?? [];
+      lines.push(
+        `- ${def.id} [${def.kind === 'answer' ? 'delegate' : 'start_task'}] — ${def.purpose}. ` +
+          (order.length ? `Served by: ${order.join(' → ')}.` : 'No worker can serve it now.') +
+          (r?.skipped.length ? ` Passed over: ${r.skipped.map((s) => `${s.worker} (${s.reason})`).join('; ')}.` : '')
+      );
+    }
+    lines.push(`Thresholds: an entry is passed over past ${policy.skip5hPct}% of a 5-hour window or ${policy.skipWeeklyPct}% of a weekly one (still used when every entry is).`);
+    return lines.join('\n');
   }
 
   dispose(): void {

@@ -231,6 +231,7 @@ export class StatusBarManager implements vscode.Disposable {
           ? '[$(checklist) Agent tasks](command:claudeProfiles.showAgentTasks "Open a task\'s log or patch, or cancel it")'
           : '',
         workers.length ? '[$(graph) Usage](command:claudeProfiles.showUsage "How much of each worker provider\'s plan is used")' : '',
+        workers.length ? '[$(type-hierarchy) Orchestration](command:claudeProfiles.showOrchestration "Which models serve which work, at what effort, with what fallbacks")' : '',
         unique.length > 0
           ? '[$(trash) Forget…](command:claudeProfiles.removeProfile "Sign the account out and remove it from the list")'
           : '',
@@ -242,10 +243,11 @@ export class StatusBarManager implements vscode.Disposable {
           ? `$(credit-card) Billing to **${provider.name}** — an Anthropic API key, per token. The account's ` +
             `login stays saved but unused until you switch back to **Anthropic**.`
           : provider
-            ? `$(credit-card) Billing to **${provider.name}** (\`${provider.baseUrl}\`) — the Anthropic login ` +
-              `stays saved but unused until you switch back.` +
+            ? `$(credit-card) Billing to **${provider.name}** (${
+                provider.kind === 'codex' ? 'an OpenAI API key, per token, through the local proxy' : `\`${provider.baseUrl}\``
+              }) — the Anthropic login stays saved but unused until you switch back.` +
               (describeModels(provider) ? `\n\nModels: ${describeModels(provider)}` : '') +
-              (provider.extraModels?.length
+              (provider.extraModels?.length && provider.kind !== 'codex'
                 ? ` · plus ${provider.extraModels.length} non-Claude through the local proxy`
                 : '')
             : `$(credit-card) Billing to **Anthropic** — ${describeLogin(dir)}.`,

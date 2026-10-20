@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { AccountRegistry } from './accounts';
+import { AccountRegistry, readIdentity } from './accounts';
 import { WindowBinding } from './binding';
 import { StatusBarManager } from './statusBar';
 import { SetupWizard, NOTICE_KEY } from './setupWizard';
@@ -10,7 +10,8 @@ import { ensureSharedHistory } from './sharedHistory';
 import { defaultSourceDir } from './capture';
 import { AccountWatcher } from './accountWatcher';
 import { HostState } from './hostState';
-import { ProviderManager } from './providers';
+import { describeLogin, ProviderManager } from './providers';
+import { OrchestrationPanel } from './orchestration';
 import { DelegateServer } from './delegate';
 import { AgentTasks } from './agentTasks';
 import { Transcripts } from './transcripts';
@@ -206,6 +207,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // The account hover links each task and worker to its transcripts.
     cmd('claudeProfiles.showAgentTaskTranscript', (id?: string) => (id ? transcripts.openTask(id) : transcripts.pick())),
     cmd('claudeProfiles.showWorkerTranscripts', (worker?: string) => transcripts.pick(worker)),
+    cmd('claudeProfiles.showOrchestration', () =>
+      OrchestrationPanel.show({
+        providers,
+        workers,
+        account: () => {
+          const dir = binding.getEnvDir();
+          return { email: dir ? readIdentity(dir)?.email : undefined, login: providers.active()?.name ?? describeLogin(dir) };
+        },
+      })
+    ),
     cmd('claudeProfiles.showUsage', async () => {
       const report = await workers.usageReport();
       const doc = await vscode.workspace.openTextDocument({ content: `Provider usage\n\n${report}\n`, language: 'plaintext' });

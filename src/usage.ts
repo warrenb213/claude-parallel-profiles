@@ -1,11 +1,14 @@
+import * as fs from 'fs';
+import * as path from 'path';
 /**
  * What's left on each provider, for the lead (provider_usage) and the user.
  *
  * Sources, best first:
- *  - The Anthropic login: Claude Code's own `rate_limit_event` messages (5-hour
- *    and weekly windows, from Anthropic's response headers), seen whenever a
- *    worker call runs on the login. Never an extra call made with the login's
- *    token — only Claude Code talks to the subscription.
+ *  - The Anthropic login: the usage report Claude Code itself fetches and caches
+ *    in its config (`.claude.json` → cachedUsageUtilization — what /usage shows),
+ *    read from the account's windows; and Claude Code's `rate_limit_event`
+ *    messages on login-worker calls. Never a call made with the login's token —
+ *    only Claude Code talks to the subscription.
  *  - Z.ai: its quota monitor (`/api/monitor/usage/quota/limit`). Unofficial and
  *    undocumented: read defensively, shown as such.
  *  - Everyone: this window's own worker calls and tokens.
@@ -63,6 +66,50 @@ export async function zaiQuota(key: string): Promise<UsageEntry | undefined> {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The Anthropic plan's usage as Claude Code last fetched it (it caches what /usage
+ * shows in `.claude.json`): the freshest copy among `dirs` belonging to `email`.
+ * Just a file read — no token, no request.
+ */
+export function claudeCodeUsage(dirs: string[], email: string | undefined): UsageEntry | undefined {
+  type Limit = { kind?: string; percent?: number; resets_at?: string; scope?: { model?: { display_name?: string | null } | null } | null };
+  type Win = { utilization?: number; resets_at?: string } | null;
+  let best: { at: number; u: Record<string, unknown>; tier?: string } | undefined;
+  for (const dir of dirs) {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(path.join(dir, '.claude.json'), 'utf-8')) as {
+        oauthAccount?: { emailAddress?: string; organizationRateLimitTier?: string };
+        cachedUsageUtilization?: { fetchedAtMs?: number; utilization?: Record<string, unknown> };
+      };
+      const c = cfg.cachedUsageUtilization;
+      if (!c?.utilization || typeof c.fetchedAtMs !== 'number') continue;
+      if (email && cfg.oauthAccount?.emailAddress !== email) continue;
+      if (!best || c.fetchedAtMs > best.at) best = { at: c.fetchedAtMs, u: c.utilization, tier: cfg.oauthAccount?.organizationRateLimitTier };
+    } catch {
+      /* no config, or unreadable */
+    }
+  }
+  if (!best) return undefined;
+  const ms = (s?: string) => (s ? Date.parse(s) || undefined : undefined);
+  const windows: UsageWindow[] = [];
+  const limits = Array.isArray(best.u.limits) ? (best.u.limits as Limit[]) : [];
+  for (const l of limits) {
+    if (typeof l.percent !== 'number') continue;
+    const model = l.scope?.model?.display_name;
+    const label = l.kind === 'session' ? 'per 5 hours' : l.kind === 'weekly_all' ? 'per week' : /weekly/.test(l.kind ?? '') ? `per week${model ? ` (${model})` : ''}` : (l.kind ?? 'limit');
+    windows.push({ label, usedPct: l.percent, resetsAt: ms(l.resets_at) });
+  }
+  if (windows.length === 0) {
+    for (const [k, label] of [['five_hour', 'per 5 hours'], ['seven_day', 'per week'], ['seven_day_opus', 'per week (Opus)'], ['seven_day_sonnet', 'per week (Sonnet)']] as const) {
+      const w = best.u[k] as Win;
+      if (w && typeof w.utilization === 'number') windows.push({ label, usedPct: w.utilization, resetsAt: ms(w.resets_at) });
+    }
+  }
+  if (windows.length === 0) return undefined;
+  const plan = best.tier?.replace(/^default_claude_/, '').replace(/_/g, ' ').replace(/\b(\w)/g, (c) => c.toUpperCase());
+  return { plan, windows, source: "Claude Code's own usage report", at: best.at };
 }
 
 /** Claude Code's `rate_limit_event.rate_limit_info` → windows. */
@@ -130,7 +177,7 @@ export class UsageBook {
     for (const p of providers) {
       const e = this.entries.get(p);
       if (!e) {
-        lines.push(`${p}: no usage data yet${p === 'Anthropic login' ? ' — it appears after the first worker call on the login' : ''}.`);
+        lines.push(`${p}: no usage data yet${p === 'Anthropic login' ? " — Claude Code hasn't cached a usage report in this account's windows yet" : ''}.`);
         continue;
       }
       lines.push(`${p}${e.plan ? ` (${e.plan} plan)` : ''} — ${e.source}, ${ago(e.at)}:`);

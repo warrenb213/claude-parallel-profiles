@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.15.1 — 2026-10-20
+
+### Changed
+
+- **The orchestration panel works from every model, not just enabled workers.** It lists each model your providers offer with what it can do — answers, agent tasks, image generation, image input — from the providers themselves where they say (Codex's model list and its image-generation capability, a gateway's model list). Any model that can do a role's kind of work can be added to it; one not enabled yet is marked *enabled on save*, and saving enables what the roles use — as a worker, and for agent tasks where needed — after one confirmation. *Suggest from all models* builds chains from everything available.
+- **The Anthropic plan's usage, always.** Claude Code caches the usage report `/usage` shows in its config (`cachedUsageUtilization`); the panel, `provider_usage` and the role thresholds now read it from this account's windows — the 5-hour, weekly and per-model weekly windows, with the plan tier (e.g. *Max 20x*) and when Claude Code fetched it. A file read: no token, no request. Before, it only showed up after a worker call on the login.
+- **README:** what each provider can do (chat window, answers, agent tasks, 2D art, plan usage) in one table, a worked multi-subscription setup with its flow, Codex and orchestration in the architecture diagram, and install from GitHub Releases.
+- **Suggested chains spread across providers**: the strongest current model first (newer generations win ties), the first fallback on another provider — a used-up plan fails every model on it — and at most two models of one provider per chain.
+
+## 1.15.0 — 2026-10-20
+
+### Added
+
+- **OpenAI Codex as a provider for workers and agent tasks.** *Add a Provider → OpenAI Codex* adds GPT models (whatever Codex lists for the account — `gpt-6.1-sol`, `gpt-6-astra`, `gpt-6-luna`…) as workers. Everything runs through the Codex CLI itself — the OpenAI extension's bundled binary, or `codex` on PATH:
+  - **Sign-in:** a ChatGPT plan through Codex's own sign-in (default; the extension never touches its tokens, and offers `codex login` in a terminal — `--device-auth` in remote windows), or an OpenAI API key, kept in secret storage and passed to each run as `CODEX_API_KEY` with a Codex home of its own.
+  - **Consultations** (`delegate`): `codex exec`, read-only, in an empty folder, with the shell and other tools off and the user's Codex config and rules not loaded.
+  - **Agent tasks**: Codex itself in the worktree (`--approve-for-me`: workspace-write sandbox with automatic approval review, no network for commands), browser, desktop and plugins off, nothing kept on disk; it consults other workers through the workers MCP server (verified: Codex completes the MCP handshake with it). Transcripts show its commands, edits and consultations; limits count Codex steps.
+  - **Usage**: the ChatGPT plan's Codex windows (5-hour, weekly, per-model limits) in `provider_usage`, read from `codex app-server` (`account/rateLimits/read`) without sending a message.
+  - **Test connection** (who Codex is signed in as, or the API key against OpenAI's model list) and *Refresh model list* (`model/list`).
+  - **GPT in chat windows, on an OpenAI API key.** *Chat-window models* picks which GPT models appear in Claude Code's model picker and which is the default; the window then bills to the key through the local LiteLLM proxy (OpenAI isn't Anthropic-compatible), as non-Claude gateway models do. Claude Code's opus/sonnet/haiku slots get GPT models and only the enabled ones are allowed. Verified up to OpenAI: a Claude Code request through the proxy reached `api.openai.com` and came back in Claude Code's format. A ChatGPT plan stays workers-only — the extension doesn't use it outside Codex (LiteLLM's `chatgpt/` provider would, by presenting itself as the Codex CLI).
+
+- **Orchestration: roles and fallbacks.** The lead can ask by role — `delegate(role: "review")`, `start_task(role: "implement")` — and the extension picks the model from a chain the user set, the same way every time. Roles by category: *Answers* (quick, second-opinion, review, hard-reasoning), *Build* (implement, test-and-fix), *Art* (2d-art via Codex image generation, vector-art). Each chain entry has an effort (Claude Code `--effort`, Codex reasoning effort clamped to what the model takes, a thinking budget on Messages-API workers). Entries past 95% of a 5-hour or 90% of a weekly window (configurable) are passed over; failures a next provider may not share (rate limit, used-up plan, sign-in, outage) fall back to the next entry. Answers and tasks report who served them and what was passed over; `list_roles` shows the lead the same. Until saved, a template builds the chains from the configured workers, subscriptions first.
+- **Orchestration panel** (*Claude Accounts: Orchestration*, and in the account's hover): the configured account, providers, workers and plan usage; each role's chain to reorder, extend or switch off, with effort; the thresholds; and a live preview of who would serve each role now.
+
+### Fixed
+
+- The agent-task consent still said "80 turns, 30 minutes"; it now gives the current limits.
+
 ## 1.14.2 — 2026-10-19
 
 ### Fixed

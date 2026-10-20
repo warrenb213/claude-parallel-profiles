@@ -1,15 +1,16 @@
 # Claude Parallel Accounts
 
+[![Release](https://img.shields.io/github/v/release/warrenb213/claude-parallel-profiles?label=release)](https://github.com/warrenb213/claude-parallel-profiles/releases/latest)
 [![Platform: Linux](https://img.shields.io/badge/platform-Linux%20%7C%20WSL%20%7C%20SSH-orange.svg)](#requirements)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **A companion for the [Claude Code extension for VS Code](https://marketplace.visualstudio.com/items?itemName=anthropic.claude-code): a different Claude account in each VS Code window, at the same time, with one shared conversation history — and, per window, a choice of who serves and bills the requests, plus other models the window's AI can hand work to.**
 
-Claude Code signs you into **one** account, shared by every window. This extension gives **each window its own account** (personal, work, a second plan for when the first hits its limits), keeps your conversations in one history across all of them, and lets each window bill to its Anthropic login, an Anthropic API key, or a gateway such as Z.ai. The window's Claude can also consult or delegate real work to other models you enable — GLM on Z.ai, or Claude on your own subscription — and you review what they change before it lands.
+Claude Code signs you into **one** account, shared by every window. This extension gives **each window its own account** (personal, work, a second plan for when the first hits its limits), keeps your conversations in one history across all of them, and lets each window bill to its Anthropic login, an Anthropic API key, or a gateway such as Z.ai. The window's Claude can also consult or delegate real work to other models you enable — GLM on Z.ai, GPT through OpenAI Codex, or Claude on your own subscription — and you review what they change before it lands.
 
 It's a **companion**, not a replacement: the official Claude Code extension must be installed.
 
-> **About this fork.** This is [warrenb213/claude-parallel-profiles](https://github.com/warrenb213/claude-parallel-profiles), a fork of [DercasDrol/claude-parallel-profiles](https://github.com/DercasDrol/claude-parallel-profiles). Upstream (1.3.x, on the Marketplace) provides the per-window accounts and shared history. This fork adds [providers](#providers), [workers](#workers) and [agent tasks](#agent-tasks-real-work-reviewed-by-the-lead), and is installed from a `.vsix` — it is never published to the Marketplace. See [Install](#install).
+> **About this fork.** This is [warrenb213/claude-parallel-profiles](https://github.com/warrenb213/claude-parallel-profiles), a fork of [DercasDrol/claude-parallel-profiles](https://github.com/DercasDrol/claude-parallel-profiles). Upstream (1.3.x, on the Marketplace) provides the per-window accounts and shared history. This fork adds [providers](#providers) (Anthropic API keys, Z.ai, Poe, OpenAI Codex, custom gateways), [workers](#workers) and [agent tasks](#agent-tasks-real-work-reviewed-by-the-lead) on those providers, and [orchestration](#orchestration-roles-and-fallbacks) — roles with fallback chains across your subscriptions. It is installed from a `.vsix` on [GitHub Releases](https://github.com/warrenb213/claude-parallel-profiles/releases) — never published to the Marketplace. See [Install](#install).
 
 > **Linux only (for now).** Desktop Linux, **WSL**, **Remote-SSH** to a Linux host, and dev containers. The check happens where the extension runs — in a WSL or SSH window that's the Linux *remote* — so a Windows or macOS desktop driving a Linux remote is fully supported. On macOS and native Windows the extension stays completely **inert**: no files read or written, no accounts touched; the status bar says why. (Claude Code stores credentials differently there, e.g. in the macOS Keychain, and guessing would be worse than declining.)
 
@@ -17,9 +18,10 @@ It's a **companion**, not a replacement: the official Claude Code extension must
 
 ## Contents
 
-- [The idea in 30 seconds](#the-idea-in-30-seconds) · [Architecture](#architecture) · [Requirements](#requirements) · [Install](#install)
+- [The idea in 30 seconds](#the-idea-in-30-seconds) · [What each provider can do](#what-each-provider-can-do) · [A setup in practice](#a-setup-in-practice)
+- [Architecture](#architecture) · [Requirements](#requirements) · [Install](#install)
 - [Accounts](#accounts) · [One conversation history](#one-conversation-history)
-- [Providers](#providers) · [Workers](#workers) · [Seeing what workers did](#seeing-what-workers-did)
+- [Providers](#providers) · [Workers](#workers) · [Orchestration: roles and fallbacks](#orchestration-roles-and-fallbacks) · [Seeing what workers did](#seeing-what-workers-did)
 - [Commands](#commands) · [Privacy & your data](#privacy--your-data) · [Uninstalling](#uninstalling) · [Limitations](#limitations)
 - [How it works](#how-it-works) · [Development & releases](#development--releases)
 
@@ -32,8 +34,60 @@ It's a **companion**, not a replacement: the official Claude Code extension must
 - **Switching reloads the window.** Claude Code reads its account once at start-up, so only a reload makes it both *show* and *bill* the account you picked.
 - **History stays one whole.** Hit a usage limit, switch account, continue the same conversation.
 - **Each window picks its provider too:** the account's Anthropic login (the default), an Anthropic API key, or a gateway such as Z.ai's GLM Coding Plan.
-- **Workers:** the window's Claude can ask other models you enabled for answers, or have them do real work in a scratch copy of your repo, which it reviews before applying.
+- **Workers:** the window's Claude can ask other models you enabled for answers, or have them do real work in a scratch copy of your repo, which it reviews before applying — including GPT through **OpenAI Codex**, on your ChatGPT plan, and 2D art from Codex's image generation.
+- **Orchestration:** you decide once which models serve which kind of work — reviews, implementation, hard questions, art — at what effort, and what takes over when a plan runs low. The lead asks by role; the extension picks, the same way every time, and says who served.
+- **Usage awareness:** each plan's 5-hour and weekly windows (Anthropic, Codex, Z.ai) are read without spending anything, shown in the hover and the orchestration panel, and used to route around a plan that's nearly used up.
 - **Forget really signs out**, and **uninstalling really cleans up**: your history goes back into the default `~/.claude`, your last account stays signed in there.
+
+---
+
+## What each provider can do
+
+| Provider | Chat window | Answers (`delegate`) | Agent tasks | 2D art | Plan usage |
+| --- | --- | --- | --- | --- | --- |
+| **Anthropic login** (default) | ✓ the account's own plan | ✓ haiku · sonnet · opus, as headless Claude Code with no tools | — | — | ✓ 5-hour, weekly, per-model weekly (Claude Code's own report) |
+| **Anthropic API key** | ✓ per token | ✓ | ✓ Claude Code, auto mode | — | tokens only |
+| **Z.ai GLM Coding Plan** | ✓ GLM-5.3 in every slot, 1M context | ✓ GLM-5.3, GLM-5.3-Flash | ✓ Claude Code on GLM, auto mode | — | ✓ Coding Plan windows (unofficial monitor) |
+| **Poe** | ✓ its Claude models; others through the local proxy | ✓ Claude models | ✓ Claude models | — | — |
+| **Custom gateway** | ✓ | ✓ | ✓ | — | — |
+| **OpenAI Codex — ChatGPT plan** | — only Codex may use the plan | ✓ Codex, read-only, tools off | ✓ Codex itself, in its sandbox | ✓ Codex image generation | ✓ the plan's Codex windows (Codex's own report) |
+| **OpenAI Codex — API key** | ✓ GPT through the local proxy, per token | ✓ | ✓ | ✓ if the account has it | tokens only |
+
+**Effort** is set per role entry, low → max, and reaches each runner its own way: Claude Code's `--effort`, Codex's reasoning effort (within what the model takes), a thinking budget on Messages-API workers (Z.ai, gateways). **Images as input** (reviewing art, screenshots): every Claude model, and the Codex models that say so.
+
+## A setup in practice
+
+One person, three subscriptions — **Claude Max** (Anthropic login), **Z.ai GLM Coding Plan**, **ChatGPT Pro** (Codex) — set up once:
+
+1. Claude Max is each window's provider: it **leads**.
+2. *Add a Provider → Z.ai GLM Coding Plan* and *→ OpenAI Codex → ChatGPT plan* (sign in to Codex when asked).
+3. *Claude Accounts: Orchestration → Suggest from all models → Save*: the template puts implementation and test-fixing on GLM, reviews and second opinions on Codex, hard questions on Opus or Astra, 2D art on Codex — each with fallbacks on another provider. Saving enables those models as workers after one confirmation.
+
+Then, in any chat:
+
+```mermaid
+sequenceDiagram
+  participant You
+  participant L as Claude (lead, on Max)
+  participant X as This extension
+  participant G as GLM (Z.ai plan)
+  participant C as Codex (ChatGPT plan)
+  You->>L: "Add a dash ability to the player, with an icon"
+  L->>X: start_task(role: implement)
+  X->>G: Claude Code on GLM, in a worktree
+  L->>X: start_task(role: 2d-art, "a dash icon, 64×64, transparent")
+  X->>C: Codex with image generation, in a worktree
+  G-->>X: report + diff
+  C-->>X: report + icon file
+  L->>X: delegate(role: review, the diff)
+  Note over X: Codex at 96% of its 5-hour window:<br/>passed over, next in the chain
+  X->>G: review on GLM instead
+  G-->>L: review (served by GLM — Codex passed over, and why)
+  L->>X: apply_task_changes (after reading both diffs)
+  L-->>You: what changed, what was reviewed, by whom
+```
+
+Everything stays visible: the account's hover shows active tasks and links to each one's transcript; the orchestration panel shows what each plan has left and who would serve each role right now.
 
 ---
 
@@ -48,9 +102,11 @@ flowchart TB
     cc["Claude Code extension<br/>(chat sessions)"]
     term["Integrated terminals"]
     mcp["Workers MCP server<br/>127.0.0.1"]
+    roles["Roles · fallbacks<br/>(orchestration)"]
     tasks["Agent tasks"]
     ext --- mcp
     ext --- tasks
+    mcp --- roles
   end
 
   subgraph host["This host — your home directory"]
@@ -76,6 +132,9 @@ flowchart TB
   cc -- "non-Claude models" --> proxy --> gw
   mcp -- "delegate" --> gw
   mcp -- "delegate (login worker)" --> anth
+  mcp -- "delegate · usage" --> codex["Codex CLI<br/>(ChatGPT plan or API key)"]
+  tasks -- "Codex runs" --> codex
+  codex --> openai["OpenAI"]
 ```
 
 | Part | Source | What it does |
@@ -86,6 +145,8 @@ flowchart TB
 | Status bar | `statusBar.ts` | The account item: its text, click action and hover card. |
 | Providers | `providers.ts`, `modelCatalog.ts`, `litellm.ts`, `litellm/` | Per-window billing, gateway model lists, the optional LiteLLM proxy. |
 | Workers | `delegate.ts`, `usage.ts` | The MCP server the lead uses: `delegate`, usage, agent task tools. |
+| Orchestration | `roles.ts`, `orchestration.ts` | Roles, their fallback chains and effort; the panel that edits them. |
+| OpenAI Codex | `codex.ts` | The Codex CLI as a worker: consultations, agent task runs, account, plan usage, models. |
 | Agent tasks | `agentTasks.ts`, `transcripts.ts` | Snapshots, worktrees, headless runs, diffs, transcripts. |
 | Host state | `hostState.ts` | `~/.claude-windows/.state.json`, shared by every window on the host. |
 | Uninstall | `uninstall.js` | Hands back the account and history and removes the extension's folders. |
@@ -102,12 +163,13 @@ flowchart TB
 | `claude` CLI on `$PATH` | asked read-only (`claude auth status`) whether a directory is signed in |
 | `git` | agent tasks only: they work on a worktree of the window's repository |
 | `uv`, or Python 3.10–3.14 | non-Claude models only: installs the local LiteLLM proxy |
+| Codex CLI | OpenAI Codex only: the OpenAI extension (`openai.chatgpt`), or `codex` on `$PATH` (`npm install -g @openai/codex`) |
 
 ---
 
 ## Install
 
-1. **Get the `.vsix`.** Build it (`npm ci && npm run package`, see [Development](#development--releases)), or use one you were given — `claude-parallel-accounts-<version>.vsix`.
+1. **Get the `.vsix`** from the [latest release](https://github.com/warrenb213/claude-parallel-profiles/releases/latest) (`claude-parallel-accounts-<version>.vsix`), or build it yourself (`npm ci && npm run package`, see [Development](#development--releases)).
 2. **Install it** where the extension runs: in the window itself (a WSL or SSH window installs on the remote), *Extensions → ⋯ → Install from VSIX…*, or `code --install-extension claude-parallel-accounts-<version>.vsix`. Reload the window.
 3. **You're probably already signed in.** The status bar shows your email; the account is saved automatically.
 4. **Add another account:** in Claude Code, sign in as it (account menu, or `/login`). The extension saves it and reloads the window onto it; the previous account stays in the list.
@@ -213,6 +275,8 @@ flowchart LR
 
 **Providers belong to one account on one host.** A provider is seen only by windows running that same Claude account on that same host; the same account on another host adds its own.
 
+**OpenAI Codex** is a provider too (*Add a Provider → OpenAI Codex*), first of all for [workers](#openai-codex-as-a-worker). With an **OpenAI API key** it can also run chat windows on GPT: OpenAI isn't Anthropic-compatible, so the local LiteLLM proxy translates, as it does for non-Claude models on gateways (see [GPT in chat windows](#gpt-in-chat-windows-openai-api-key)). On a **ChatGPT plan** it stays workers-only — only Codex itself may use the plan — and isn't offered under *Switch provider*.
+
 ### Models on a gateway
 
 - **Z.ai GLM Coding Plan** is set up as [Z.ai documents for Claude Code](https://docs.z.ai/devpack/tool/claude): GLM in the opus/sonnet/haiku slots (`glm-5.3[1m]`, `glm-5.3-flash[1m]`) with its 1M context window and a long request timeout. Change the slots under *Model aliases*.
@@ -234,7 +298,7 @@ Claude Code is built for Claude; other models can use its tools, but less reliab
 
 ## Workers
 
-The window's Claude (the **lead**) can hand work to other models you've set up — Claude on your subscription leads and asks, say, GLM on Z.ai for a second opinion, a review or a whole change. Workers are off until you pick them, per provider (*Edit or Remove a Provider → Workers*), with a one-time confirmation of what leaves the machine. Claude on the account's own login can be a worker too (*Anthropic login (this account)*: haiku, sonnet, opus).
+The window's Claude (the **lead**) can hand work to other models you've set up — Claude on your subscription leads and asks, say, GLM on Z.ai or GPT through Codex for a second opinion, a review or a whole change. Workers are off until you pick them, per provider (*Edit or Remove a Provider → Workers*), with a one-time confirmation of what leaves the machine. Claude on the account's own login can be a worker too (*Anthropic login (this account)*: haiku, sonnet, opus).
 
 | | `delegate` (answers) | Agent tasks (real work) |
 | --- | --- | --- |
@@ -256,14 +320,49 @@ flowchart TB
   Lead -- "lead token: every tool" --> MCP
   MCP -- "delegate" --> API["Gateway worker<br/>e.g. GLM on Z.ai"]
   MCP -- "delegate" --> Login["Login worker<br/>headless claude -p, no tools,<br/>on the account's own directory"]
+  MCP -- "delegate" --> Codex["Codex worker<br/>headless codex exec, read-only,<br/>tools off, ChatGPT plan or API key"]
   MCP -- "start / wait / cancel / apply" --> Tasks
-  Tasks -- "spawns" --> Run["Headless Claude Code<br/>auto mode, in a git worktree,<br/>on the worker's model"]
+  Tasks -- "spawns" --> Run["Headless run in a git worktree:<br/>Claude Code in auto mode,<br/>or Codex in its sandbox"]
   Run -- "worker token: delegate,<br/>list_workers, provider_usage" --> MCP
   Keys -. "read per call" .-> MCP
   Keys -. "process env only" .-> Run
 ```
 
 **How it's served.** A small MCP server inside the extension, on `127.0.0.1`, registered in the window's own Claude Code config (`.claude.json`) while some worker is enabled, and removed when none is or the window closes. Open sessions are told when workers change (`tools/list_changed`) and pick up the new tools without restarting. Each call reads the provider's key from VS Code's secret storage; the window's own provider is untouched.
+
+### Orchestration: roles and fallbacks
+
+Instead of picking a model each time, the lead asks for a **role** — `delegate(role: "review")`, `start_task(role: "implement")` — and the extension decides who serves it, the same way every time, from chains you set in *Claude Accounts: Orchestration* (also in the account's hover).
+
+| Category | Role | Tool | For |
+| --- | --- | --- | --- |
+| Answers | `quick` | `delegate` | summaries, bulk rewriting, quick checks |
+| | `second-opinion` | `delegate` | an independent take from another model family than the lead |
+| | `review` | `delegate` | code review: bugs, risks, missing tests |
+| | `hard-reasoning` | `delegate` | algorithms, architecture, subtle bugs |
+| Build | `implement` | `start_task` | a change in a scratch worktree, built and tested |
+| | `test-and-fix` | `start_task` | run the tests, fix what fails |
+| Art | `2d-art` | `start_task` | raster images (sprites, textures, concept art) from Codex's image generation, saved as files |
+| | `vector-art` | `start_task` | SVG icons, diagrams, simple vector art |
+
+```mermaid
+flowchart LR
+  L["Lead: delegate(role: review)"] --> R{"Role chain<br/>(your order)"}
+  R --> C1{"1st entry: enabled,<br/>can run, plan under<br/>its threshold?"}
+  C1 -- "yes" --> Call1["Call it at the entry's effort"]
+  C1 -- "no: passed over<br/>(to the back if only over threshold)" --> C2{"next entry"}
+  Call1 -- "answer" --> Back["Answer, with who served it<br/>and what was passed over"]
+  Call1 -- "429, used-up plan, sign-in,<br/>outage, timeout" --> C2
+  C2 --> Call2["Call it"] --> Back
+```
+
+- **Chains.** Each role has an ordered list of worker models, each with an **effort** (low → max: Claude Code's `--effort`, Codex's reasoning effort within what the model takes, a thinking budget on Messages-API workers). Until you save your own, a **template** builds them from your workers, subscriptions first — e.g. implement on GLM's Coding Plan, review and second opinions on Codex, hard reasoning on Opus on your login, 2D art on Codex.
+- **Thresholds.** An entry whose plan has used more than 95% of a 5-hour window or 90% of a weekly one (yours to change) is passed over to the back of the chain; when every entry is past its threshold, the least-used still serves. Usage comes from Codex and Z.ai (read when older than five minutes) and, for the Anthropic login, from the usage report Claude Code itself caches as you work (what `/usage` shows) — read from the file, never fetched with your token.
+- **Fallback.** A consultation that fails for a reason the next provider may not share — rate limit, used-up plan or balance, sign-in, outage, timeout — moves to the next entry; a malformed request doesn't. An agent task starts on the first entry that can run now (it isn't restarted mid-run).
+- **Visible.** Each answer and task says who served it and what was passed over and why; transcripts record the role and effort. `list_roles` gives the lead the same picture.
+- **The panel** shows every model your providers offer — enabled or not — with what each can do (*answers*, *agent tasks*, *images*, *sees images*) and its plan's usage with reset times; each role's chain to reorder, extend or switch off; the thresholds; and, live as you edit, who would serve each role. A role's *Add* list holds every model that can do that kind of work; one that isn't enabled yet is marked *enabled on save*, and saving enables what the roles use (as a worker, and for agent tasks where the role needs them) after one confirmation. *Suggest from all models* builds chains from everything available, strongest current model first and the first fallback on another provider.
+- **Where capabilities come from.** Codex says which models it offers, which take images, and whether the account can generate them (`model/list`, `modelProvider/capabilities/read`); a gateway's model list says what it serves to Claude Code; agent tasks need a provider key or Codex, so models on the Anthropic login answer only.
+- The window's own chat can't switch providers mid-conversation (that takes a reload); roles cover the work the lead hands off.
 
 ### `delegate`: answers only
 
@@ -274,7 +373,7 @@ sequenceDiagram
   participant W as Worker (e.g. GLM on Z.ai)
   L->>M: delegate(worker, task, context)
   M->>M: check limits · read the key from secret storage
-  M->>W: one Messages API request<br/>(login worker: headless claude -p)
+  M->>W: one Messages API request<br/>(login worker: headless claude -p · Codex: codex exec)
   W-->>M: answer (+ tokens, plan usage)
   M-->>L: answer — the lead checks it before relying on it
   Note over M: kept for the transcripts and the usage book
@@ -283,10 +382,11 @@ sequenceDiagram
 - The worker gets the task and what the lead pastes in — nothing else. It can't read files, run commands or change anything.
 - At most 120,000 characters sent and 8,192 tokens back per call, and 100 calls per window session. GLM gets extra room for its thinking, and is asked again without thinking if that used the whole budget.
 - **Login workers** run Claude Code itself, headless, on the account's own directory (never a window's working copy, which may be set to a gateway), with no tools, no MCP servers and the session not saved. The extension never handles the subscription's token. Calls count toward the plan.
+- **Codex workers** run Codex itself — see [OpenAI Codex as a worker](#openai-codex-as-a-worker).
 
 ### Agent tasks: real work, reviewed by the lead
 
-A worker enabled for agent tasks runs **Claude Code headless on its own model** (e.g. GLM-5.3 on Z.ai), in **auto mode**, inside a scratch **git worktree** of your repo. It edits files and runs builds and tests there; nothing reaches your working tree unless the lead reviews the diff and applies it.
+A worker enabled for agent tasks runs **Claude Code headless on its own model** (e.g. GLM-5.3 on Z.ai), in **auto mode** — or, for a Codex worker, **Codex itself** in its sandbox — inside a scratch **git worktree** of your repo. It edits files and runs builds and tests there; nothing reaches your working tree unless the lead reviews the diff and applies it.
 
 ```mermaid
 sequenceDiagram
@@ -294,13 +394,13 @@ sequenceDiagram
   participant L as Lead
   participant T as Agent tasks
   participant G as git
-  participant R as Worker run (headless Claude Code)
+  participant R as Worker run (Claude Code or Codex)
   L->>T: start_task(worker, task, context, include?, minutes?, after?)
   T->>G: snapshot HEAD + uncommitted changes<br/>(temporary index, within budgets)
   T->>G: worktree add (LFS files stay pointers)
   T->>T: link node_modules, .venv … · fresh config · key in env only
   T-->>L: task_id
-  T->>R: start in auto mode, told its limits
+  T->>R: start (auto mode, or Codex's sandbox), told its limits
   loop while it works
     R->>R: edit files · run builds and tests
     R-->>T: messages and tool calls (live transcript)
@@ -333,7 +433,7 @@ stateDiagram-v2
 - **The snapshot.** HEAD plus your uncommitted changes, built with a temporary index so yours is never touched. Untracked files come along within a budget — 5 MB a file, 100 MB and 2,000 files in all, `.gitignore` respected — by top-level folder, smallest first; a folder that doesn't fit is left out whole. Git LFS files are never copied (they stay pointers). A repository whose tracked files exceed 5 GB is refused. What was left out is told to the worker and the lead.
 - **Gitignored files it needs.** The lead lists them in `include` (files or folders; 5 MB a file, 100 MB and 2,000 files in all), or names a file in the task by absolute path. Paths to your repo in the task are rewritten to the worker's copy.
 - **Builds and tests.** Gitignored dependency folders at the top of the repo (`node_modules`, `.venv`, `venv`, `vendor`, …) are linked into the worktree. They're your copies, so the worker is told not to install into them, and the links are removed before its changes are collected.
-- **Isolation.** A fresh Claude Code config: none of your login, plugins or MCP servers; the provider key only in the run's environment. It runs the Claude Code extension's own binary — the version your chats use — and `claude` on PATH only where that extension isn't installed. A run that doesn't start in auto mode (an older Claude Code may quietly fall back to "default", where every edit is denied) is stopped at once with that reason.
+- **Isolation.** A fresh Claude Code config: none of your login, plugins or MCP servers; the provider key only in the run's environment. (Codex runs: see [below](#openai-codex-as-a-worker).) It runs the Claude Code extension's own binary — the version your chats use — and `claude` on PATH only where that extension isn't installed. A run that doesn't start in auto mode (an older Claude Code may quietly fall back to "default", where every edit is denied) is stopped at once with that reason.
 - **Safety checks.** Auto mode checks each consequential action with a classifier on the worker's own model (about 35K tokens a check on Z.ai).
 - **What comes back.** The report and a diff against the snapshot: changes to existing files, and new files the worker wrote with its file tools. Files that only appeared as side effects of its commands (build output, caches, logs) are listed but left out. The patch and run log stay under `~/.claude-windows/agent-tasks` for 7 days.
 - **Applying.** `apply_task_changes` checks the patch first and applies it to the working tree only — never staged — with your usual Claude Code permission for that tool.
@@ -347,7 +447,48 @@ stateDiagram-v2
 The account's hover card lists the workers and the recent tasks: worker, progress and current action while running; files changed and whether applied when done; why it stopped.
 
 - **Transcripts.** A task's worker name in the hover opens that task's transcript; a worker under *Workers* (with a count) lists its tasks and consultations in this window. Transcripts open in the Markdown preview. A task's shows its run — messages, each tool call with its command or edit, results and thinking collapsed, the report and changes — and follows along while it runs; a consultation's shows the question, context and answer. Also *Claude Accounts: Show Worker Transcripts*. Consultations are kept in memory only, the latest 50.
-- **Usage.** `provider_usage` (for the lead and for runs) and *Claude Accounts: Show Provider Usage* report how much of each plan is used, so work can be spread across subscriptions instead of exhausting one: the Anthropic login's 5-hour and weekly windows (from Claude Code's own rate-limit reports on login-worker calls), Z.ai's Coding Plan windows (from its quota monitor — unofficial, may change), and this window's calls, tasks and tokens per worker.
+- **Usage.** `provider_usage` (for the lead and for runs) and *Claude Accounts: Show Provider Usage* report how much of each plan is used, so work can be spread across subscriptions instead of exhausting one: the Anthropic login's 5-hour, weekly and per-model weekly windows (from the usage report Claude Code caches in this account's windows — just a file read — and its rate-limit reports on login-worker calls), the ChatGPT plan's Codex windows (from Codex itself, without sending a message), Z.ai's Coding Plan windows (from its quota monitor — unofficial, may change), and this window's calls, tasks and tokens per worker.
+
+### OpenAI Codex as a worker
+
+*Add a Provider → OpenAI Codex* adds GPT models (e.g. `gpt-6.1-sol`, `gpt-6-astra`, `gpt-6-luna` — whatever Codex lists for your account) as workers. Everything runs through the **Codex CLI itself**: the OpenAI extension's bundled `codex`, or `codex` on PATH.
+
+```mermaid
+flowchart LR
+  subgraph ext["This extension"]
+    M["Workers MCP server"]
+    T["Agent tasks"]
+  end
+  M -- "delegate" --> E1["codex exec --json<br/>read-only, empty folder,<br/>shell and other tools off"]
+  T -- "start_task" --> E2["codex exec --json --approve-for-me<br/>in the worktree: writes only there,<br/>no network for commands"]
+  M -- "provider_usage" --> A["codex app-server<br/>account/rateLimits/read"]
+  E2 -- "delegate (worker token)" --> M
+  E1 --> O["OpenAI"]
+  E2 --> O
+  A --> O
+```
+
+- **Signing in.** *ChatGPT plan* (the default) uses Codex's own sign-in on this host (`~/.codex`); the extension never reads or sends its tokens. If Codex isn't signed in, adding the provider offers *Sign in to Codex*, which opens a terminal running `codex login` (`--device-auth` in a remote window, where the browser is on another machine). *OpenAI API key* is billed per token: the key stays in VS Code's secret storage and reaches each run as `CODEX_API_KEY`, with a Codex home of its own (`~/.claude-windows/codex/<id>`), so it never touches your own Codex sign-in or config.
+- **Consultations** run `codex exec` read-only, in an empty temporary folder, with the shell and other tools off and your Codex config and rules not loaded — the task and the lead's material, nothing else.
+- **Agent tasks** run Codex in the worktree with `--approve-for-me`: its workspace-write sandbox (writes only inside the worktree; linked dependency folders can be read but not written; commands get no network), approval requests reviewed automatically, browser, desktop and plugins off, nothing kept on disk (`--ephemeral`). It can consult other workers through the workers MCP server with the restricted token. Its transcript shows each shell command, edit and consultation. Limits count Codex *steps* (each message, command or edit).
+- **Usage.** On a ChatGPT plan, `provider_usage` shows the plan's Codex windows (5-hour and weekly, and any per-model limits) from Codex's own report, read without sending a message. On an API key, tokens only.
+- **Test connection** asks Codex who it's signed in as (ChatGPT plan), or checks the key against OpenAI's model list (API key). *Refresh model list* re-reads what Codex offers.
+
+#### GPT in chat windows (OpenAI API key)
+
+An API-key Codex provider can also bill a whole chat window: *Edit or Remove a Provider → Codex → Chat-window models* (or *Set up chat windows* when adding it, or picking it under *Switch provider*) chooses which GPT models appear in Claude Code's model picker and which one is the default.
+
+```mermaid
+flowchart LR
+  CC["Claude Code<br/>(this window)"] -- "Anthropic Messages API,<br/>proxy key" --> P["LiteLLM proxy<br/>127.0.0.1"]
+  P -- "OpenAI API, your API key<br/>(in the proxy's memory only)" --> O["api.openai.com"]
+```
+
+- Claude Code's model slots get GPT models — sonnet (its default) your pick, opus and haiku the closest enabled match (e.g. `gpt-6-astra`, `gpt-6-luna`); haiku also runs Claude Code's titles and summaries. Only the enabled models are allowed, so a Claude model saved earlier falls back to one of them.
+- Same proxy as for non-Claude gateway models: hash-pinned LiteLLM, `127.0.0.1` only, the key in its memory, stopped when the models are turned off or the provider removed.
+- **Billed per token to the API key** — an OpenAI Platform key is separate from a ChatGPT plan, which includes Codex but not API usage. Codex workers on a ChatGPT plan keep counting toward the plan.
+- Claude Code is built for Claude; GPT uses its tools, but less reliably.
+- Not for a ChatGPT plan: tools that do this (LiteLLM's `chatgpt/` provider among them) sign in with the Codex CLI's own OAuth client and present themselves as Codex to ChatGPT's private backend. This extension doesn't — the plan is only ever used by Codex itself.
 
 ---
 
@@ -362,11 +503,12 @@ All under **Claude Accounts** in the Command Palette; most are also in the statu
 | Account Quick Action | The status bar click. |
 | Forget a Saved Account | Remove an account and delete its token everywhere on this host. |
 | Switch Provider for This Window | Anthropic, an API key, or a gateway; reloads the window. |
-| Add a Provider | Presets (Z.ai, Poe), an Anthropic API key, or a custom gateway. |
+| Add a Provider | Presets (Z.ai, Poe), OpenAI Codex (workers), an Anthropic API key, or a custom gateway. |
 | Edit or Remove a Provider | Key, URL, models, connection test, non-Claude models, workers. |
 | Show Agent Tasks | Open a task's transcript, log or patch, or cancel it. |
 | Show Worker Transcripts | A worker's tasks and consultations in this window. |
 | Show Provider Usage | How much of each plan is used. |
+| Orchestration (Roles and Fallbacks) | Roles by category, their chains, effort and thresholds, and who serves each now. |
 | Show Log | What the extension has been doing. |
 
 **Settings: none.** Everything is managed from the status bar and these commands.
@@ -384,12 +526,13 @@ This extension manages credentials, so it holds itself to a strict policy — ea
   - worker calls (`delegate`), to the worker's provider, with what the lead sends;
   - Z.ai's quota monitor, for usage reports (a plain GET with the Z.ai key);
   - with non-Claude models on, the hash-pinned LiteLLM install from PyPI, and the proxy's traffic to your gateway;
-  - Claude Code runs it starts (login workers, agent tasks) talk to their provider like any Claude Code session.
+  - Claude Code runs it starts (login workers, agent tasks) talk to their provider like any Claude Code session;
+  - Codex runs it starts (Codex workers and their agent tasks, usage and model lookups through `codex app-server`) talk to OpenAI like any Codex session, and an OpenAI API key's connection test reads `api.openai.com/v1/models`.
 
   With no providers or workers added, it makes no requests at all.
 - **Everything stays in your home directory.** Accounts, working copies, the history store and host state live under `~/.claude*`, created owner-only (`700`/`600`). Credentials are only ever *copied between* Claude Code's own data directories on this host — never parsed beyond checking they exist, never displayed, never sent anywhere.
 - **Provider keys** are kept in VS Code's secret storage on the computer running VS Code, under a name tied to the account and host. A window using a provider also gets a copy in its own `settings.json` (`600`), because that file is how Claude Code receives it; switching back to Anthropic, removing the provider, or uninstalling removes it. With non-Claude models on, the window gets the local proxy's key instead.
-- **Workers send what the lead chooses, to the provider you enabled** — and, for a gateway such as Z.ai, to the model's maker — billed to its key. Nothing is sent unless the AI calls the tool, and only to models you switched on.
+- **Workers send what the lead chooses, to the provider you enabled** — and, for a gateway such as Z.ai, to the model's maker — billed to its key or counted toward its plan (a ChatGPT plan, for Codex). Nothing is sent unless the AI calls the tool, and only to models you switched on.
 - **Agent tasks read your repo.** A worker enabled for agent tasks reads a scratch copy of the repository as it works, so that content goes to its provider. Its run has no access to your login, plugins or MCP servers, and its changes stay in the copy unless the lead applies them.
 - **History is moved, not read.** It is relinked, never parsed or sent; when two directories hold the same file it's compared byte for byte, and `history.jsonl` lines are merged.
 - **Host state** (`~/.claude-windows/.state.json`) records your accounts, providers (without keys), and which account each folder used last — by the folder's path. Window working copies are named by a hash of the workspace path.
@@ -435,7 +578,8 @@ flowchart TB
 - **Sign-out is tidied up at the next start.** After `/logout` the window shows *Claude: sign in* at once, but the account leaves the list when the window next starts.
 - **Agent tasks need a git repository** with at least one commit, and `git` on the host.
 - **Other models in Claude Code** use its tools less reliably than Claude, and auto mode's safety checks run on them too.
-- **Unofficial usage data.** Z.ai's quota monitor isn't a documented API.
+- **Unofficial usage data.** Z.ai's quota monitor isn't a documented API; the Anthropic plan's usage is as fresh as Claude Code's last fetch of it (its age is shown).
+- **New in 1.15 and not yet run end to end:** Codex consultations and agent tasks, 2D art through Codex's image generation in a headless run, and GPT chat windows on an OpenAI API key. Their parts are tested up to the provider (sign-in, usage, models, capabilities, the proxy's route to OpenAI); a first real run may still turn up an issue.
 
 ---
 
@@ -481,7 +625,7 @@ npm run compile   # typecheck + build
 npm run package   # build the .vsix (production bundle)
 ```
 
-**Releases of this fork** are `.vsix` files built with `npm run package` and installed by hand ([Install](#install)); `CHANGELOG.md` lists each one. The fork **never publishes to the Marketplace or Open VSX**: GitHub Actions are disabled on it, and the publish steps in [`release.yml`](.github/workflows/release.yml) only run in the upstream repository.
+**Releases of this fork** are [GitHub Releases](https://github.com/warrenb213/claude-parallel-profiles/releases): a `v<version>` tag with the `.vsix` built by `npm run package` attached, and the version's `CHANGELOG.md` entry as its notes. They're made by hand — `gh release create v<version> claude-parallel-accounts-<version>.vsix --notes-file …` — and installed by hand ([Install](#install)). The fork **never publishes to the Marketplace or Open VSX**: GitHub Actions are disabled on it, and the publish steps in [`release.yml`](.github/workflows/release.yml) only run in the upstream repository.
 
 Upstream's workflows, for reference: [`ci.yml`](.github/workflows/ci.yml) builds the `.vsix` on every push and PR to `main`; [`release.yml`](.github/workflows/release.yml), on a `v*` tag, creates a GitHub Release with the `.vsix` and publishes to the VS Code Marketplace and Open VSX.
 

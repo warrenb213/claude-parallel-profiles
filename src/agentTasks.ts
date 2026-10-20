@@ -8,6 +8,8 @@ import { log } from './log';
 import { MCP_CALL_TIMEOUT_MS } from './delegate';
 import { claudeShellArgs } from './cli';
 import { fence, details, clip } from './transcripts';
+import { AGENT_DISABLED, CodexContext, CodexEvent, codexShellArgs } from './codex';
+import { clampEffort, Effort } from './roles';
 
 /**
  * Agent tasks: a worker that does real work, not just answers.
@@ -27,7 +29,11 @@ import { fence, details, clip } from './transcripts';
  */
 
 export interface AgentRunSpec {
-  /** The model id Claude Code should run, as the provider's settings name it (e.g. "glm-5.3[1m]"). */
+  /** Who runs the task: Claude Code (default) on the provider's model, or Codex itself (codex.ts). */
+  runner?: 'claude' | 'codex';
+  /** Codex only: how to run it. */
+  codex?: CodexContext;
+  /** The model id the runner should use, as the provider names it (e.g. "glm-5.3[1m]", "gpt-6.1-sol"). */
   runModel: string;
   /** settings.json for the run — no secrets. */
   settings: Record<string, unknown>;
@@ -81,6 +87,12 @@ interface Task {
   lastText?: string;
   lastOutput?: number;
   cancelling?: boolean;
+  /** Who ran it — Claude Code, or Codex itself — and on which model. */
+  runner?: 'claude' | 'codex';
+  model?: string;
+  /** Started for a role (roles.ts), at this effort. */
+  role?: string;
+  effort?: Effort;
   applied?: boolean;
   waiters: Array<() => void>;
 }
@@ -135,7 +147,7 @@ const DEP_DIRS = ['node_modules', '.venv', 'venv', '.virtualenv', 'vendor', '.bu
 
 /** The workers MCP server, as agent runs see it (restricted token: consult tools only). */
 const CONSULT_SERVER = 'claude-accounts-workers';
-const CONSULT_TOOLS = ['delegate', 'list_workers', 'provider_usage'];
+const CONSULT_TOOLS = ['delegate', 'list_roles', 'list_workers', 'provider_usage'];
 const CONSULT_INSTRUCTIONS =
   ' You can consult other models with the `delegate` tool (answers only — paste in what they need), ' +
   "e.g. Claude on the user's subscription for a second opinion on a tricky change. `list_workers` shows who " +
@@ -230,6 +242,47 @@ function continuation(pred: Task | undefined): string {
     'in this copy.' +
     (pred.lastText ? ` Its last message:\n<previous_run>\n${pred.lastText.slice(0, 4000)}\n</previous_run>` : '')
   );
+}
+
+/** A Codex `exec --json` event as transcript blocks (completed items carry everything). */
+function codexTranscript(ev: CodexEvent): string[] {
+  const it = ev.item;
+  if (ev.type === 'thread.started') return ['_Codex run started._'];
+  if (ev.type === 'turn.completed') {
+    const u = ev.usage ?? {};
+    return [`_Turn ended: ${(u.input_tokens ?? 0).toLocaleString('en-US')} in (${(u.cached_input_tokens ?? 0).toLocaleString('en-US')} cached) / ${((u.output_tokens ?? 0) + (u.reasoning_output_tokens ?? 0)).toLocaleString('en-US')} out tokens._`];
+  }
+  if (ev.type === 'turn.failed') return [`**Failed:** ${ev.error?.message ?? 'the run failed'}`];
+  if (ev.type !== 'item.completed' || !it) return [];
+  switch (it.type) {
+    case 'agent_message':
+      return it.text?.trim() ? [it.text.trim()] : [];
+    case 'reasoning':
+      return it.text?.trim() ? [details('Thinking', fence(clip(it.text.trim(), 4000)))] : [];
+    case 'command_execution': {
+      const output = it.aggregated_output ?? '';
+      const lines = output ? output.split('\n').length : 0;
+      return [
+        '**Shell**',
+        fence(clip(it.command ?? '', 3000), 'sh'),
+        details(`${it.exit_code ? `Exit ${it.exit_code}` : 'Result'} · ${lines} line${lines === 1 ? '' : 's'}`, fence(clip(output, 3000))),
+      ];
+    }
+    case 'file_change':
+      return [`**Edit** · ${(it.changes ?? []).map((c) => `\`${(c.path ?? '?').replace(/`/g, "'")}\` (${c.kind ?? 'change'})`).join(', ')}`];
+    case 'mcp_tool_call':
+      return [
+        `**${it.server ?? 'mcp'}.${it.tool ?? '?'}**`,
+        it.arguments !== undefined ? fence(clip(JSON.stringify(it.arguments, null, 2), 2000), 'json') : '',
+        it.result !== undefined ? details('Result', fence(clip(typeof it.result === 'string' ? it.result : JSON.stringify(it.result, null, 2), 3000))) : '',
+      ];
+    case 'web_search':
+      return [`**Web search** · ${it.query ?? ''}`];
+    case 'todo_list':
+      return [(it.items ?? []).map((x) => `- [${x.completed ? 'x' : ' '}] ${x.text ?? ''}`).join('\n')];
+    default:
+      return [];
+  }
 }
 
 /** A tool call's one-line heading in a transcript: what it acts on. */
@@ -347,7 +400,8 @@ export class AgentTasks implements vscode.Disposable {
       [
         `**Status:** ${t.status}${t.applied ? ' (applied)' : ''}`,
         `**Started:** ${new Date(t.started).toLocaleString()} · ${secs < 120 ? `${secs} s` : `${Math.round(secs / 60)} min`}`,
-        `**Limits:** ${t.minutes} min, ${t.maxTurns} turns`,
+        t.model ? `**Run by:** ${t.runner === 'codex' ? 'Codex' : 'Claude Code'} on ${t.model}${t.effort ? `, effort ${t.effort}` : ''}${t.role ? ` · role ${t.role}` : ''}` : '',
+        `**Limits:** ${t.minutes} min, ${t.maxTurns} ${t.runner === 'codex' ? 'steps' : 'turns'}`,
         `**Turns:** ${t.turns} · **tool uses:** ${t.toolUses}${t.inTok !== undefined ? ` · **tokens:** ${t.inTok.toLocaleString('en-US')} in / ${(t.outTok ?? 0).toLocaleString('en-US')} out` : ''}`,
         t.after ? `**Built on:** ${t.after}` : '',
         t.error ? `**Error:** ${t.error}` : '',
@@ -373,6 +427,10 @@ export class AgentTasks implements vscode.Disposable {
         ev = JSON.parse(line);
       } catch {
         other.push(line);
+        continue;
+      }
+      if (t.runner === 'codex') {
+        out.push(...codexTranscript(ev as CodexEvent));
         continue;
       }
       if (ev.type === 'system' && ev.subtype === 'init') {
@@ -593,7 +651,7 @@ export class AgentTasks implements vscode.Disposable {
   async start(
     worker: string,
     task: string,
-    opts: { context?: string; after?: string; include?: string[]; minutes?: number; maxTurns?: number } = {}
+    opts: { context?: string; after?: string; include?: string[]; minutes?: number; maxTurns?: number; role?: string; effort?: Effort } = {}
   ): Promise<{ id: string; queued: boolean; note?: string }> {
     const { context, after, include = [] } = opts;
     const bound = (v: number | undefined, l: { default: number; min: number; max: number }) =>
@@ -614,6 +672,7 @@ export class AgentTasks implements vscode.Disposable {
       id, worker, task, context, after, status: 'queued', dir, repo, base: '', worktree: path.join(dir, 'worktree'),
       started: Date.now(), turns: 0, toolUses: 0, written: new Set(), waiters: [],
       minutes: bound(opts.minutes, TASK_LIMITS.minutes), maxTurns: bound(opts.maxTurns, TASK_LIMITS.turns),
+      role: opts.role, effort: opts.effort,
     };
     const notes: string[] = [];
     const refused: string[] = [];
@@ -693,23 +752,27 @@ export class AgentTasks implements vscode.Disposable {
       }
     }
     if (t.links.length) log(`agent task ${t.id}: linked ${t.links.join(', ')} from the repo`);
-    fs.writeFileSync(path.join(config, 'settings.json'), JSON.stringify(spec.settings, null, 2), { mode: 0o600 });
+    t.runner = spec.runner === 'codex' && spec.codex ? 'codex' : 'claude';
+    t.model = spec.runModel;
     // Workers can consult: the workers server with the restricted token (delegate, list_workers, provider_usage).
     const access = this.access?.();
-    fs.writeFileSync(
-      path.join(config, '.claude.json'),
-      JSON.stringify({
-        hasCompletedOnboarding: true,
-        projects: { [t.worktree]: { hasTrustDialogAccepted: true } },
-        ...(spec.approveKeyTail && { customApiKeyResponses: { approved: [spec.approveKeyTail], rejected: [] } }),
-        ...(access && {
-          mcpServers: {
-            [CONSULT_SERVER]: { type: 'http', url: access.url, headers: { Authorization: `Bearer ${access.token}` }, timeout: MCP_CALL_TIMEOUT_MS },
-          },
+    if (t.runner === 'claude') {
+      fs.writeFileSync(path.join(config, 'settings.json'), JSON.stringify(spec.settings, null, 2), { mode: 0o600 });
+      fs.writeFileSync(
+        path.join(config, '.claude.json'),
+        JSON.stringify({
+          hasCompletedOnboarding: true,
+          projects: { [t.worktree]: { hasTrustDialogAccepted: true } },
+          ...(spec.approveKeyTail && { customApiKeyResponses: { approved: [spec.approveKeyTail], rejected: [] } }),
+          ...(access && {
+            mcpServers: {
+              [CONSULT_SERVER]: { type: 'http', url: access.url, headers: { Authorization: `Bearer ${access.token}` }, timeout: MCP_CALL_TIMEOUT_MS },
+            },
+          }),
         }),
-      }),
-      { mode: 0o600 }
-    );
+        { mode: 0o600 }
+      );
+    }
     t.status = 'running';
     t.started = Date.now();
     // The lead names files by their real paths; the worker must read and edit its copy.
@@ -719,27 +782,16 @@ export class AgentTasks implements vscode.Disposable {
       `${RUN_INSTRUCTIONS}${access ? CONSULT_INSTRUCTIONS : ''}` +
       ' Git LFS files in this copy are pointer files, not their content.' +
       (t.snapshotNote ? ` ${t.snapshotNote}` : '') +
-      ` You have ${t.minutes} minutes and ${t.maxTurns} turns. Your changes so far are kept if you run out, ` +
+      ` You have ${t.minutes} minutes and ${t.maxTurns} ${t.runner === 'codex' ? 'steps' : 'turns'}. Your changes so far are kept if you run out, ` +
       'but your report is not: if you might, stop in time and report what is done and what is left.' +
       continuation(t.after ? this.tasks.get(t.after) : undefined) +
+      (t.role === '2d-art'
+        ? ' Generate the images with your image generation tool, then save each one as a file in this worktree — at ' +
+          'the path the task gives, else under assets/generated/ — and list the paths in your report.'
+        : '') +
       `\n\n<task>\n${local(t.task)}\n</task>` +
       (t.context ? `\n\n<context>\n${local(t.context)}\n</context>` : '');
-    const args = [
-      '-p', prompt, '--model', spec.runModel, '--permission-mode', 'auto',
-      '--output-format', 'stream-json', '--verbose', '--no-session-persistence', '--max-turns', String(t.maxTurns),
-      // Consulting is answers-only and already consented to: no classifier check per call.
-      ...(access ? ['--allowedTools', ...CONSULT_TOOLS.map((n) => `mcp__${CONSULT_SERVER}__${n}`)] : []),
-    ];
-    // Only the run's own config and provider: none of this window's account or provider leaks in.
-    const env: NodeJS.ProcessEnv = { ...process.env };
-    for (const k of Object.keys(env)) if (k.startsWith('ANTHROPIC_') || k === 'CLAUDE_CONFIG_DIR') delete env[k];
-    Object.assign(env, spec.secretEnv, { CLAUDE_CONFIG_DIR: config, PYTHONDONTWRITEBYTECODE: '1' });
-    // The Claude Code extension's binary, through a login shell (see cli.ts).
-    const child = spawn(process.env.SHELL || '/bin/bash', claudeShellArgs(args), {
-      cwd: t.worktree,
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const child = t.runner === 'codex' ? this.spawnCodex(t, spec.codex!, spec.runModel, prompt, access) : this.spawnClaude(t, spec, prompt, access, config);
     t.child = child;
     const out = fs.openSync(path.join(t.dir, 'log.jsonl'), 'a', 0o600);
     let buf = '';
@@ -750,7 +802,8 @@ export class AgentTasks implements vscode.Disposable {
       buf += d.toString();
       let nl: number;
       while ((nl = buf.indexOf('\n')) >= 0) {
-        this.onEvent(t, buf.slice(0, nl));
+        if (t.runner === 'codex') this.onCodexEvent(t, buf.slice(0, nl));
+        else this.onEvent(t, buf.slice(0, nl));
         buf = buf.slice(nl + 1);
       }
     });
@@ -770,8 +823,101 @@ export class AgentTasks implements vscode.Disposable {
       fs.closeSync(out);
       void this.finish(t, code);
     });
-    log(`agent task ${t.id}: started on ${t.worker} (${spec.runModel}) in ${t.worktree}`);
+    log(`agent task ${t.id}: started on ${t.worker} (${t.runner === 'codex' ? 'Codex' : 'Claude Code'}, ${spec.runModel}) in ${t.worktree}`);
     this.render();
+  }
+
+  /** Claude Code on the worker's provider: its own config dir, auto mode, stream-json. */
+  private spawnClaude(t: Task, spec: AgentRunSpec, prompt: string, access: { url: string; token: string } | undefined, config: string): ChildProcess {
+    const args = [
+      '-p', prompt, '--model', spec.runModel, '--permission-mode', 'auto',
+      ...(t.effort ? ['--effort', t.effort] : []),
+      '--output-format', 'stream-json', '--verbose', '--no-session-persistence', '--max-turns', String(t.maxTurns),
+      // Consulting is answers-only and already consented to: no classifier check per call.
+      ...(access ? ['--allowedTools', ...CONSULT_TOOLS.map((n) => `mcp__${CONSULT_SERVER}__${n}`)] : []),
+    ];
+    // Only the run's own config and provider: none of this window's account or provider leaks in.
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    for (const k of Object.keys(env)) if (k.startsWith('ANTHROPIC_') || k === 'CLAUDE_CONFIG_DIR') delete env[k];
+    Object.assign(env, spec.secretEnv, { CLAUDE_CONFIG_DIR: config, PYTHONDONTWRITEBYTECODE: '1' });
+    // The Claude Code extension's binary, through a login shell (see cli.ts).
+    return spawn(process.env.SHELL || '/bin/bash', claudeShellArgs(args), {
+      cwd: t.worktree,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  }
+
+  /**
+   * Codex itself on its model: `codex exec` in the worktree, its sandbox limited
+   * to writing there (no network for commands), approval requests reviewed
+   * automatically, the user's Codex config and rules not loaded (its sign-in
+   * still is), nothing kept on disk. The workers server comes in as an MCP server
+   * with the restricted token, from the environment. Prompt on stdin.
+   */
+  private spawnCodex(t: Task, ctx: CodexContext, model: string, prompt: string, access: { url: string; token: string } | undefined): ChildProcess {
+    const mcp = `mcp_servers.${CONSULT_SERVER}`;
+    const args = [
+      'exec', '--json', '--ephemeral', '--ignore-user-config', '--ignore-rules',
+      // --approve-for-me is the workspace-write sandbox with automatic review (it refuses --sandbox alongside).
+      '--approve-for-me', '-m', model, '-C', t.worktree,
+      ...(t.effort ? ['-c', `model_reasoning_effort=${JSON.stringify(clampEffort(t.effort, ctx.efforts?.[model]))}`] : []),
+      ...AGENT_DISABLED.flatMap((f) => ['--disable', f]),
+      ...(access
+        ? ['-c', `${mcp}.url=${JSON.stringify(access.url)}`, '-c', `${mcp}.bearer_token_env_var="CLAUDE_ACCOUNTS_WORKERS_TOKEN"`, '-c', `${mcp}.tool_timeout_sec=${Math.floor(MCP_CALL_TIMEOUT_MS / 1000)}`]
+        : []),
+      '-',
+    ];
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    for (const k of Object.keys(env)) if (k.startsWith('ANTHROPIC_') || k === 'CLAUDE_CONFIG_DIR' || k === 'OPENAI_API_KEY' || k === 'CODEX_API_KEY') delete env[k];
+    Object.assign(env, ctx.env, { CODEX_HOME: ctx.home, PYTHONDONTWRITEBYTECODE: '1' }, access ? { CLAUDE_ACCOUNTS_WORKERS_TOKEN: access.token } : {});
+    const child = spawn(process.env.SHELL || '/bin/bash', codexShellArgs(ctx.bin, args), { cwd: t.worktree, env, stdio: ['pipe', 'pipe', 'pipe'] });
+    child.stdin!.end(prompt);
+    return child;
+  }
+
+  /** Codex's `exec --json` events: items (messages, commands, file changes, MCP calls) and turn usage. */
+  private onCodexEvent(t: Task, line: string): void {
+    let ev: CodexEvent;
+    try {
+      ev = JSON.parse(line);
+    } catch {
+      return;
+    }
+    const it = ev.item;
+    if (ev.type === 'item.started' && it) {
+      if (it.type === 'command_execution' && it.command) t.lastAction = `$ ${it.command.slice(0, 80)}`;
+      else if (it.type === 'mcp_tool_call') t.lastAction = `${it.server ?? 'mcp'}.${it.tool ?? '?'}`;
+      this.render();
+    } else if (ev.type === 'item.completed' && it) {
+      t.turns++;
+      if (it.type === 'agent_message' && it.text?.trim()) t.lastText = it.text.trim();
+      if (it.type === 'command_execution' || it.type === 'mcp_tool_call') t.toolUses++;
+      if (it.type === 'file_change') {
+        t.toolUses++;
+        const files: string[] = [];
+        for (const c of it.changes ?? []) {
+          if (!c.path) continue;
+          const rel = path.relative(t.worktree, path.resolve(t.worktree, c.path));
+          if (rel.startsWith('..')) continue;
+          files.push(rel.split(path.sep).join('/'));
+          if (c.kind !== 'delete') t.written.add(rel.split(path.sep).join('/'));
+        }
+        t.lastAction = `edit ${files.join(', ').slice(0, 80)}`;
+      }
+      if (t.turns > t.maxTurns && !t.error) {
+        t.error = `stopped at its ${t.maxTurns}-step limit`;
+        this.kill(t);
+      }
+      this.render();
+    } else if (ev.type === 'turn.completed') {
+      t.inTok = (t.inTok ?? 0) + (ev.usage?.input_tokens ?? 0);
+      t.outTok = (t.outTok ?? 0) + (ev.usage?.output_tokens ?? 0) + (ev.usage?.reasoning_output_tokens ?? 0);
+      t.report = t.lastText;
+    } else if (ev.type === 'turn.failed' && !t.error) {
+      // `error` events are often retries ("Reconnecting... 2/5"); a failed turn is final.
+      t.error = ev.error?.message ?? 'the run failed';
+    }
   }
 
   private onEvent(t: Task, line: string): void {
@@ -838,7 +984,9 @@ export class AgentTasks implements vscode.Disposable {
       t.sideEffects = [];
       for (const line of status) {
         const [code, file] = line.split('\t');
-        if (code === 'A' && !t.written.has(file)) t.sideEffects.push(file);
+        // 2D art: images come from the image tool and get copied in by command — they ARE the work.
+        const art = t.role === '2d-art' && /\.(png|jpe?g|webp|gif|svg)$/i.test(file);
+        if (code === 'A' && !t.written.has(file) && !art) t.sideEffects.push(file);
         else included.push(file);
       }
       t.files = included;

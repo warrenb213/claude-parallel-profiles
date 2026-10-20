@@ -41,6 +41,8 @@ const KEYS = [
   'claudeProfiles.loginWorkers',
   /** Set once this host's existing account stores were sorted into created vs adopted (accounts.ts). */
   'claudeProfiles.storesClassified',
+  /** Roles and their fallback chains (roles.ts), by account email. */
+  'claudeProfiles.roles',
 ] as const;
 export type HostStateKey = (typeof KEYS)[number];
 
