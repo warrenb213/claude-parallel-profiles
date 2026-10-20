@@ -11,6 +11,8 @@ It's a **companion** for the [Claude Code extension for VS Code](https://marketp
 
 > **About CPPO.** CPPO began as a fork of [Claude Parallel Accounts](https://github.com/DercasDrol/claude-parallel-profiles) by DercasDrol (MIT), which provides the per-window accounts and shared history; providers, workers, agent tasks and orchestration are CPPO's own, and it is now a separate project. It's installed from a `.vsix` on [GitHub Releases](https://github.com/warrenb213/cppo/releases). Coming from Claude Parallel Accounts, or an earlier CPPO? See [Moving from an earlier copy](#moving-from-an-earlier-copy).
 
+> **A personal project — keep personal and work separate.** CPPO is built and shared in a personal capacity; it isn't affiliated with or endorsed by any employer. It's useful for personal projects and, where your organization allows it, for work — but **don't mix the two on one machine**: keep personal accounts, API keys and subscriptions off work equipment, and work accounts, code and credentials off personal equipment. On a work machine, check your organization's policies on AI tools and on sending code to outside providers first. See [Terms of service](#terms-of-service).
+
 > **Linux only (for now).** Desktop Linux, **WSL**, **Remote-SSH** to a Linux host, and dev containers. The check happens where the extension runs — in a WSL or SSH window that's the Linux *remote* — so a Windows or macOS desktop driving a Linux remote is fully supported. On macOS and native Windows the extension stays completely **inert**: no files read or written, no accounts touched; the status bar says why. (Claude Code stores credentials differently there, e.g. in the macOS Keychain, and guessing would be worse than declining.)
 
 ---
@@ -374,7 +376,8 @@ Every account, key and plan you connect is governed by its provider's terms — 
 
 - **Several accounts with one service.** Many providers don't allow using more than one account or key to get around usage limits. Separate accounts for separate purposes — personal and work, or different organizations — are the reason this extension supports several. When you save a second Claude account, or add a provider of a service this host already has (a second Z.ai key, a second Codex sign-in, a second Anthropic API key…), the extension says so and points to that service's terms.
 - **Subscriptions are used only by their own clients.** A Claude plan is only ever used by Claude Code, a ChatGPT plan only by Codex; the extension never reads, copies or sends their tokens, and doesn't route them through anything else (see [GPT in chat windows](#gpt-in-chat-windows-openai-api-key) for why a ChatGPT plan can't serve a chat window here).
-- **What you send to a worker** goes to that provider under its terms and data policies.
+- **What you send to a worker** goes to that provider under its terms and data policies — including your repository's content, for agent tasks. On work equipment that may be restricted by your organization's policies; ask before enabling workers there.
+- **Personal and work stay separate.** CPPO can hold several accounts on one host, but that's no reason to mix them: use personal accounts, keys and subscriptions on personal equipment, and work ones on work equipment, within your organization's rules.
 
 ---
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- README: a notice that CPPO is a personal project and that personal and work accounts, keys and code shouldn't be mixed on one machine; a matching note under *Terms of service*.
+
 ## 1.17.0 — 2026-10-20
 
 ### Changed
