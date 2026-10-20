@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.16.1 — 2026-10-20
+
+### Changed
+
+- **README:** a small PayPal QR code at the very top, next to the *Donate* badge — on GitHub and in VS Code's extension details tab (which shows the README packaged in the extension, hence this release).
+
 ## 1.16.0 — 2026-10-20
 
 **Claude Parallel Accounts is now CPPO — Claude Parallel Profile Orchestration**: a separate project with its own extension ID (`warrenb213.cppo`), repository ([warrenb213/cppo](https://github.com/warrenb213/cppo)) and packages (`cppo-<version>.vsix`). Accounts, providers, roles and history carry over.
