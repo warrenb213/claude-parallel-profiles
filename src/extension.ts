@@ -74,9 +74,35 @@ function activateUnsupported(context: vscode.ExtensionContext): void {
   );
 }
 
+/** CPPO is installed: no accounts, no commands, no files — only a pointer to it. */
+function activateSuperseded(context: vscode.ExtensionContext): void {
+  const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
+  item.text = '$(info) Claude Parallel Accounts → CPPO';
+  item.tooltip =
+    'CPPO is installed and runs this window. This extension (its old name) is doing nothing; uninstall it — ' +
+    'this version leaves your accounts, providers and history in place when it is removed.';
+  item.show();
+  context.subscriptions.push(item);
+  void vscode.window
+    .showInformationMessage(
+      'CPPO has taken over from Claude Parallel Accounts. Uninstall the old extension — this version of it leaves your accounts, providers and history in place.',
+      'Show it'
+    )
+    .then((pick) => {
+      if (pick) void vscode.commands.executeCommand('workbench.extensions.search', '@installed claude parallel accounts');
+    });
+}
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   if (process.platform !== 'linux') {
     activateUnsupported(context);
+    return;
+  }
+  // CPPO (warrenb213.cppo) is this extension under its new name. With it installed,
+  // this copy steps aside entirely: two copies would both claim the window's
+  // CLAUDE_CONFIG_DIR, its commands and its workers server.
+  if (vscode.extensions.getExtension('warrenb213.cppo')) {
+    activateSuperseded(context);
     return;
   }
 

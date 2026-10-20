@@ -1,8 +1,8 @@
 {
   "name": "claude-parallel-accounts",
   "displayName": "Claude Parallel Accounts",
-  "description": "Companion for the Claude Code VS Code extension: run a different Claude account in each VSCode window simultaneously — capture, switch, and isolate accounts per window.",
-  "version": "1.15.2",
+  "description": "Make Claude Code the lead of a multi-model team: delegate answers and sandboxed agent tasks to GLM, GPT (Codex) and Claude across the services you use, routed by roles with fallbacks and reviewed before they land — plus a Claude account per VS Code window, with one shared history.",
+  "version": "1.15.3",
   "publisher": "DercasDrol",
   "icon": "images/icon.png",
   "repository": {

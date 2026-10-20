@@ -78,12 +78,17 @@ const outOfTime = () => Date.now() > deadline;
  * extensions dir, minus the ones listed in `.obsolete` (VSCode's own record of
  * what is on its way out).
  */
+/**
+ * Folder-name prefixes of every copy that shares this data: this product under
+ * its old name (Claude Parallel Accounts) and its new one (CPPO). Either one
+ * installed means the data is still in use — by it.
+ */
+const PRODUCT_PREFIXES = ['dercasdrol.claude-parallel-accounts-', 'warrenb213.cppo-'];
+
 function anotherCopyInstalled() {
   try {
     const root = path.dirname(__dirname); // …/extensions
     const me = path.basename(__dirname); // publisher.name-version[-target]
-    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf-8'));
-    const prefix = `${pkg.publisher}.${pkg.name}-`.toLowerCase();
     let obsolete = {};
     try {
       obsolete = JSON.parse(fs.readFileSync(path.join(root, '.obsolete'), 'utf-8')) || {};
@@ -94,7 +99,7 @@ function anotherCopyInstalled() {
       (e) =>
         e.isDirectory() &&
         e.name !== me &&
-        e.name.toLowerCase().startsWith(prefix) &&
+        PRODUCT_PREFIXES.some((p) => e.name.toLowerCase().startsWith(p)) &&
         !obsolete[e.name]
     );
   } catch {

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.15.3 — 2026-10-20
+
+The last release under the name Claude Parallel Accounts (`DercasDrol.claude-parallel-accounts`): the bridge to **CPPO** (`warrenb213.cppo`), its new name.
+
+### Changed
+
+- **Steps aside for CPPO.** With CPPO installed, this extension does nothing — no account switching, no commands, no files touched — and says so in the status bar, so the two never claim the same window.
+- **Its uninstaller leaves CPPO's data alone.** Uninstalling it while CPPO (or any other copy of either name) is installed removes nothing: your accounts, providers, roles and history are CPPO's now. Earlier versions don't know CPPO and would delete them — update to this one before uninstalling.
+
 ## 1.15.2 — 2026-10-20
 
 ### Added
