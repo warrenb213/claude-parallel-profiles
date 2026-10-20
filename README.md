@@ -127,14 +127,7 @@ CPPO's extension ID is `beboutit503.cppo`.
 
 CPPO has shipped under earlier extension IDs — **Claude Parallel Accounts** (`DercasDrol.claude-parallel-accounts`: this project's earlier name, and the original it was built from) and **CPPO from publisher `warrenb213`** (`warrenb213.cppo`, 1.16.0–1.16.1). VS Code sees each ID as a separate extension. Your accounts, providers, roles and history live in `~/.claude-*` and carry over; three things need care:
 
-1. **Update the old copy to its bridge release first, then install CPPO, then uninstall the old copy.** Older versions don't know the new ID, and **their uninstaller deletes the account folders and history CPPO uses**. The bridges step aside while a newer copy is installed and their uninstallers leave everything in place:
-
-   | You have | Install first |
-   | --- | --- |
-   | Claude Parallel Accounts (any version) | [`claude-parallel-accounts-1.15.4.vsix`](https://github.com/warrenb213/cppo/releases/tag/v1.15.4) |
-   | CPPO from `warrenb213` (1.16.0, 1.16.1) | [`cppo-1.16.2-warrenb213-bridge.vsix`](https://github.com/warrenb213/cppo/releases/tag/v1.16.2) |
-
-   If CPPO finds an older copy that isn't a bridge, it stays idle and says so. From here on every copy carries a mark that makes this automatic: the newest runs, older ones step aside, and no uninstaller removes data another copy uses.
+1. **Don't uninstall an older copy from VS Code's UI.** Older versions don't know the new ID, and **their uninstaller deletes the account folders and history CPPO uses**. Instead, close VS Code and delete the old extension's folder (e.g. `~/.vscode-server/extensions/warrenb213.cppo-1.16.1`, or `dercasdrol.claude-parallel-accounts-*`) by hand. Until then, CPPO stays idle beside it and says so. From 1.17 on every copy carries a mark that makes this automatic: the newest runs, older marked copies step aside, and no uninstaller removes data another copy uses.
 2. **Provider keys:** VS Code keeps secrets per extension, so CPPO can't read an older copy's. It recovers the keys a window's settings still hold (gateways such as Z.ai, Anthropic API keys) and asks once for the rest (keys behind the local proxy, OpenAI API keys). Codex on a ChatGPT plan needs nothing: it's Codex's own sign-in.
 3. **Each window's provider** is recognised from the window's settings; the workers server is named `cppo` (tools `mcp__cppo__…`), and Claude Parallel Accounts' old entry is removed from each window's Claude Code config. New Claude Code sessions pick it up.
 
