@@ -446,7 +446,9 @@ The README's diagrams are PNGs rendered from the Mermaid sources in `docs/diagra
 
 ## Support CPPO
 
-CPPO is free and open source. If it saves you time, you can support its development through [PayPal](https://paypal.me/beboutit503) — thank you.
+CPPO is free and open source. If it saves you time, you can support its development through [PayPal](https://paypal.me/beboutit503) — scan the code with your phone, or click it. Thank you.
+
+[![QR code: donate to CPPO through PayPal — paypal.me/beboutit503](docs/support/paypal-qr.png)](https://paypal.me/beboutit503)
 
 ---
 

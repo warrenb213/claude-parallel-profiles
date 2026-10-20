@@ -10,7 +10,7 @@
 - **Moving over from the old extension.** CPPO stays idle while a Claude Parallel Accounts older than 1.15.3 is installed (its uninstaller would delete the data CPPO uses) and says how to proceed; with 1.15.3 installed it runs and asks for the old one to be uninstalled. It recovers provider keys still held in this account's window settings (gateways, Anthropic API keys), asks once for the rest, recognises each window's provider from its settings, keeps a window's provider until its key is entered again, and removes the old workers server's entry from each window's Claude Code config.
 - **Uninstalling CPPO** leaves the data alone while any copy of either name is installed.
 - README, license and links updated for CPPO; credit to the original project.
-- **Support CPPO**: a PayPal link — the repository's *Sponsor* button (`.github/FUNDING.yml`), the extension page's *Sponsor* link (`sponsor` in `package.json`), and the README.
+- **Support CPPO**: a PayPal link — the repository's *Sponsor* button (`.github/FUNDING.yml`), the extension page's *Sponsor* link (`sponsor` in `package.json`), and the README, with a QR code to scan.
 - **README diagrams render everywhere**: they're PNG images now, rendered from Mermaid sources in `docs/diagrams/` (`scripts/render-diagrams.sh`) — VS Code's extension page doesn't render Mermaid. The architecture diagram is redrawn around the window, your home directory and the services you use.
 
 ## 1.15.3 — 2026-10-20
