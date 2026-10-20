@@ -3,6 +3,7 @@
 [![Release](https://img.shields.io/github/v/release/warrenb213/cppo?label=release)](https://github.com/warrenb213/cppo/releases/latest)
 [![Platform: Linux](https://img.shields.io/badge/platform-Linux%20%7C%20WSL%20%7C%20SSH-orange.svg)](#requirements)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Donate](https://img.shields.io/badge/donate-PayPal-00457C.svg?logo=paypal)](https://paypal.me/beboutit503)
 
 **Make Claude Code the lead of a multi-model team.** The Claude in your chat hands focused questions and real, sandboxed coding work to the other models you use — GLM on Z.ai, GPT through OpenAI Codex, Claude on your own plan — routes each kind of work by rules you set once, and reviews every change before it reaches your code. Underneath: a different Claude account in each VS Code window, with one shared conversation history.
 
@@ -21,7 +22,7 @@ It's a **companion** for the [Claude Code extension for VS Code](https://marketp
 - [Accounts](#accounts) · [One conversation history](#one-conversation-history)
 - [Providers](#providers) · [Workers](#workers) · [Orchestration: roles and fallbacks](#orchestration-roles-and-fallbacks) · [Seeing what workers did](#seeing-what-workers-did)
 - [Commands](#commands) · [Privacy & your data](#privacy--your-data) · [Terms of service](#terms-of-service) · [Uninstalling](#uninstalling) · [Limitations](#limitations)
-- [How it works](#how-it-works) · [Development & releases](#development--releases)
+- [How it works](#how-it-works) · [Development & releases](#development--releases) · [Support CPPO](#support-cppo)
 
 ---
 
@@ -440,6 +441,12 @@ scripts/render-diagrams.sh   # README diagrams: docs/diagrams/*.mmd → .png
 The README's diagrams are PNGs rendered from the Mermaid sources in `docs/diagrams/` — VS Code's extension page doesn't render Mermaid, and the packager refuses SVG images. Edit the `.mmd`, then run the script.
 
 **Releases** are [GitHub Releases](https://github.com/warrenb213/cppo/releases): a `v<version>` tag with `cppo-<version>.vsix` (built by `npm run package`) attached, and the version's `CHANGELOG.md` entry as its notes. They're made by hand — `gh release create v<version> cppo-<version>.vsix --notes-file …` — and installed by hand ([Install](#install)). CPPO is **never published to the Marketplace or Open VSX**: GitHub Actions are disabled on the repository, and the publish steps in the workflow files inherited from the original project ([`ci.yml`](.github/workflows/ci.yml), [`release.yml`](.github/workflows/release.yml)) only run in that project's repository.
+
+---
+
+## Support CPPO
+
+CPPO is free and open source. If it saves you time, you can support its development through [PayPal](https://paypal.me/beboutit503) — thank you.
 
 ---
 
