@@ -1,16 +1,16 @@
 {
-  "name": "claude-parallel-accounts",
-  "displayName": "Claude Parallel Accounts",
+  "name": "cppo",
+  "displayName": "CPPO — Claude Parallel Profile Orchestration",
   "description": "Make Claude Code the lead of a multi-model team: delegate answers and sandboxed agent tasks to GLM, GPT (Codex) and Claude across the services you use, routed by roles with fallbacks and reviewed before they land — plus a Claude account per VS Code window, with one shared history.",
-  "version": "1.15.3",
-  "publisher": "DercasDrol",
+  "version": "1.16.0",
+  "publisher": "warrenb213",
   "icon": "images/icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/DercasDrol/claude-parallel-profiles"
+    "url": "https://github.com/warrenb213/cppo"
   },
   "bugs": {
-    "url": "https://github.com/DercasDrol/claude-parallel-profiles/issues"
+    "url": "https://github.com/warrenb213/cppo/issues"
   },
   "license": "MIT",
   "author": {
@@ -51,63 +51,63 @@
   "contributes": {
     "commands": [
       {
-        "command": "claudeProfiles.switchAccount",
+        "command": "cppo.switchAccount",
         "title": "Switch Account for This Window",
-        "category": "Claude Accounts"
+        "category": "CPPO"
       },
       {
-        "command": "claudeProfiles.captureAccount",
+        "command": "cppo.captureAccount",
         "title": "Save Current Account",
-        "category": "Claude Accounts"
+        "category": "CPPO"
       },
       {
-        "command": "claudeProfiles.showStatus",
+        "command": "cppo.showStatus",
         "title": "Account Quick Action",
-        "category": "Claude Accounts"
+        "category": "CPPO"
       },
       {
-        "command": "claudeProfiles.removeProfile",
+        "command": "cppo.removeProfile",
         "title": "Forget a Saved Account",
-        "category": "Claude Accounts"
+        "category": "CPPO"
       },
       {
-        "command": "claudeProfiles.showLog",
+        "command": "cppo.showLog",
         "title": "Show Log",
-        "category": "Claude Accounts"
+        "category": "CPPO"
       },
       {
-        "command": "claudeProfiles.switchProvider",
+        "command": "cppo.switchProvider",
         "title": "Switch Provider for This Window",
-        "category": "Claude Accounts"
+        "category": "CPPO"
       },
       {
-        "command": "claudeProfiles.addProvider",
+        "command": "cppo.addProvider",
         "title": "Add a Provider",
-        "category": "Claude Accounts"
+        "category": "CPPO"
       },
       {
-        "command": "claudeProfiles.editProvider",
+        "command": "cppo.editProvider",
         "title": "Edit or Remove a Provider",
-        "category": "Claude Accounts"
+        "category": "CPPO"
       },
       {
-        "category": "Claude Accounts",
-        "command": "claudeProfiles.showAgentTasks",
+        "category": "CPPO",
+        "command": "cppo.showAgentTasks",
         "title": "Show Agent Tasks"
       },
       {
-        "category": "Claude Accounts",
-        "command": "claudeProfiles.showUsage",
+        "category": "CPPO",
+        "command": "cppo.showUsage",
         "title": "Show Provider Usage"
       },
       {
-        "category": "Claude Accounts",
-        "command": "claudeProfiles.showWorkerTranscripts",
+        "category": "CPPO",
+        "command": "cppo.showWorkerTranscripts",
         "title": "Show Worker Transcripts"
       },
       {
-        "category": "Claude Accounts",
-        "command": "claudeProfiles.showOrchestration",
+        "category": "CPPO",
+        "command": "cppo.showOrchestration",
         "title": "Orchestration (Roles and Fallbacks)"
       }
     ]

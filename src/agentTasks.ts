@@ -146,7 +146,7 @@ const INCLUDE_COUNT_MAX = 2_000;
 const DEP_DIRS = ['node_modules', '.venv', 'venv', '.virtualenv', 'vendor', '.bundle', 'bower_components', 'Pods', '.gradle'];
 
 /** The workers MCP server, as agent runs see it (restricted token: consult tools only). */
-const CONSULT_SERVER = 'claude-accounts-workers';
+const CONSULT_SERVER = 'cppo';
 const CONSULT_TOOLS = ['delegate', 'list_roles', 'list_workers', 'provider_usage'];
 const CONSULT_INSTRUCTIONS =
   ' You can consult other models with the `delegate` tool (answers only — paste in what they need), ' +
@@ -228,9 +228,9 @@ function gitPaths(cwd: string, args: string[], max: number): Promise<{ paths: st
 }
 
 const IDENTITY = {
-  GIT_AUTHOR_NAME: 'Claude Accounts',
+  GIT_AUTHOR_NAME: 'CPPO',
   GIT_AUTHOR_EMAIL: 'agent-task@localhost',
-  GIT_COMMITTER_NAME: 'Claude Accounts',
+  GIT_COMMITTER_NAME: 'CPPO',
   GIT_COMMITTER_EMAIL: 'agent-task@localhost',
 };
 
@@ -362,7 +362,7 @@ export class AgentTasks implements vscode.Disposable {
     const all = [...this.tasks.values()].sort((a, b) => b.started - a.started);
     const active = all.filter((t) => t.status === 'running' || t.status === 'queued').length;
     const lines = all.slice(0, max).map((t) => {
-      const name = `[${md(t.worker.split('/').pop() ?? t.worker)}](command:claudeProfiles.showAgentTaskTranscript?${encodeURIComponent(JSON.stringify([t.id]))} "Open its transcript")`;
+      const name = `[${md(t.worker.split('/').pop() ?? t.worker)}](command:cppo.showAgentTaskTranscript?${encodeURIComponent(JSON.stringify([t.id]))} "Open its transcript")`;
       const what = md(t.task.length > 70 ? `${t.task.slice(0, 70)}…` : t.task);
       const secs = Math.round(((t.ended ?? Date.now()) - t.started) / 1000);
       const time = secs < 120 ? `${secs} s` : `${Math.round(secs / 60)} min`;
@@ -864,13 +864,13 @@ export class AgentTasks implements vscode.Disposable {
       ...(t.effort ? ['-c', `model_reasoning_effort=${JSON.stringify(clampEffort(t.effort, ctx.efforts?.[model]))}`] : []),
       ...AGENT_DISABLED.flatMap((f) => ['--disable', f]),
       ...(access
-        ? ['-c', `${mcp}.url=${JSON.stringify(access.url)}`, '-c', `${mcp}.bearer_token_env_var="CLAUDE_ACCOUNTS_WORKERS_TOKEN"`, '-c', `${mcp}.tool_timeout_sec=${Math.floor(MCP_CALL_TIMEOUT_MS / 1000)}`]
+        ? ['-c', `${mcp}.url=${JSON.stringify(access.url)}`, '-c', `${mcp}.bearer_token_env_var="CPPO_WORKERS_TOKEN"`, '-c', `${mcp}.tool_timeout_sec=${Math.floor(MCP_CALL_TIMEOUT_MS / 1000)}`]
         : []),
       '-',
     ];
     const env: NodeJS.ProcessEnv = { ...process.env };
     for (const k of Object.keys(env)) if (k.startsWith('ANTHROPIC_') || k === 'CLAUDE_CONFIG_DIR' || k === 'OPENAI_API_KEY' || k === 'CODEX_API_KEY') delete env[k];
-    Object.assign(env, ctx.env, { CODEX_HOME: ctx.home, PYTHONDONTWRITEBYTECODE: '1' }, access ? { CLAUDE_ACCOUNTS_WORKERS_TOKEN: access.token } : {});
+    Object.assign(env, ctx.env, { CODEX_HOME: ctx.home, PYTHONDONTWRITEBYTECODE: '1' }, access ? { CPPO_WORKERS_TOKEN: access.token } : {});
     const child = spawn(process.env.SHELL || '/bin/bash', codexShellArgs(ctx.bin, args), { cwd: t.worktree, env, stdio: ['pipe', 'pipe', 'pipe'] });
     child.stdin!.end(prompt);
     return child;
@@ -1185,7 +1185,7 @@ export class AgentTasks implements vscode.Disposable {
       { title: pick.t.id }
     );
     if (action?.a === 'cancel') vscode.window.showInformationMessage(this.cancel(pick.t.id));
-    else if (action?.a === 'transcript') await vscode.commands.executeCommand('claudeProfiles.showAgentTaskTranscript', pick.t.id);
+    else if (action?.a === 'transcript') await vscode.commands.executeCommand('cppo.showAgentTaskTranscript', pick.t.id);
     else if (action) {
       const file = action.a === 'log' ? path.join(pick.t.dir, 'log.jsonl') : pick.t.patchFile!;
       await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(file), { preview: true });

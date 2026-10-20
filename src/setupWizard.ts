@@ -83,7 +83,7 @@ export class SetupWizard {
       log(`auto-reload SUPPRESSED (${now - last}ms after the previous one): ${notice ?? ''}`);
       void vscode.window
         .showWarningMessage(
-          `Claude Accounts: ${notice ?? 'this window needs a reload to pick up its account.'} ` +
+          `CPPO: ${notice ?? 'this window needs a reload to pick up its account.'} ` +
             `The automatic reload was skipped because one just happened.`,
           'Reload window'
         )
@@ -108,7 +108,7 @@ export class SetupWizard {
     const hasAccounts = this.registry.listUniqueByEmail().length > 0;
     void vscode.window
       .showInformationMessage(
-        `Claude Accounts: ${reason} ${
+        `CPPO: ${reason} ${
           hasAccounts
             ? 'Pick another saved account, or sign in with Claude Code (its account menu, or /login).'
             : 'Sign in with Claude Code (its account menu, or /login).'
@@ -117,7 +117,7 @@ export class SetupWizard {
       )
       .then((pick) => {
         if (pick === 'Switch account') {
-          void vscode.commands.executeCommand('claudeProfiles.switchAccount');
+          void vscode.commands.executeCommand('cppo.switchAccount');
         }
       });
   }
@@ -380,7 +380,7 @@ export class SetupWizard {
     ];
     for (const d of dirs) signOut(d);
     vscode.window.showInformationMessage(
-      `Claude Accounts: you signed out of ${email}, so it was removed from the list — a logout ` +
+      `CPPO: you signed out of ${email}, so it was removed from the list — a logout ` +
         `revokes the account everywhere, not just in this window. Sign in again to bring it back.`
     );
   }

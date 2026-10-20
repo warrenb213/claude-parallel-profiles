@@ -190,7 +190,7 @@ export function appServer(
     child.on('error', done);
     child.on('close', done);
     child.stdin.write(
-      JSON.stringify({ id: 0, method: 'initialize', params: { clientInfo: { name: 'claude-parallel-accounts', title: 'Claude Parallel Accounts', version: '1' }, capabilities: null } }) + '\n'
+      JSON.stringify({ id: 0, method: 'initialize', params: { clientInfo: { name: 'cppo', title: 'CPPO', version: '1' }, capabilities: null } }) + '\n'
     );
   });
 }

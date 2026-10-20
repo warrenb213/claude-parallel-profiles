@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.16.0 — 2026-10-20
+
+**Claude Parallel Accounts is now CPPO — Claude Parallel Profile Orchestration**: a separate project with its own extension ID (`warrenb213.cppo`), repository ([warrenb213/cppo](https://github.com/warrenb213/cppo)) and packages (`cppo-<version>.vsix`). Accounts, providers, roles and history carry over.
+
+### Changed
+
+- **New identity.** Extension `warrenb213.cppo`, display name *CPPO — Claude Parallel Profile Orchestration*; commands `cppo.*` under *CPPO:* in the Command Palette; log channel, status bar card and panel titled CPPO; the workers MCP server is `cppo` (tools `mcp__cppo__…`). No Marketplace listing, so nothing can update over it.
+- **Moving over from the old extension.** CPPO stays idle while a Claude Parallel Accounts older than 1.15.3 is installed (its uninstaller would delete the data CPPO uses) and says how to proceed; with 1.15.3 installed it runs and asks for the old one to be uninstalled. It recovers provider keys still held in this account's window settings (gateways, Anthropic API keys), asks once for the rest, recognises each window's provider from its settings, keeps a window's provider until its key is entered again, and removes the old workers server's entry from each window's Claude Code config.
+- **Uninstalling CPPO** leaves the data alone while any copy of either name is installed.
+- README, license and links updated for CPPO; credit to the original project.
+
 ## 1.15.3 — 2026-10-20
 
 The last release under the name Claude Parallel Accounts (`DercasDrol.claude-parallel-accounts`): the bridge to **CPPO** (`warrenb213.cppo`), its new name.

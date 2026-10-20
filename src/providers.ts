@@ -983,6 +983,95 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
     return { dirs: [...new Set(dirs)], email: this.email() };
   }
 
+  /**
+   * What Claude Parallel Accounts (CPPO's old name) left where CPPO can't read
+   * it — VS Code keeps secrets and per-window state per extension:
+   *  - provider keys: recovered from this account's window settings.json files,
+   *    which hold a copy for Claude Code (a gateway or Anthropic key); the rest
+   *    are asked for (promptMissingKeys);
+   *  - this window's provider: recognised from its settings.json (the gateway's
+   *    URL, or the local proxy's port).
+   * Harmless when there's nothing to adopt.
+   */
+  async adoptFromOldExtension(): Promise<void> {
+    const email = this.email();
+    if (!email) return;
+    const windows = allWorkingDirs()
+      .map((dir) => {
+        let env: Record<string, string> = {};
+        try {
+          env = ((JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf-8')) as { env?: Record<string, string> }).env) ?? {};
+        } catch {
+          /* no settings */
+        }
+        return { dir, env, email: readIdentity(dir)?.email };
+      })
+      .filter((w) => w.email === email && w.env.ANTHROPIC_BASE_URL);
+    const norm = (u: string) => u.trim().replace(/\/+$/, '');
+    const natives = this.list().filter(isNative);
+    const servedBy = (p: Provider, env: Record<string, string>): boolean => {
+      const base = norm(env.ANTHROPIC_BASE_URL ?? '');
+      const port = /^http:\/\/127\.0\.0\.1:(\d+)$/.exec(base)?.[1];
+      if (port) return Number(port) === proxyPort(p.id);
+      if (isNative(p)) return base === ANTHROPIC_API && Boolean(env.ANTHROPIC_API_KEY) && natives.length === 1;
+      return !isCodex(p) && base === norm(p.baseUrl);
+    };
+    for (const p of this.list()) {
+      if ((isCodex(p) && p.codexAuth !== 'api-key') || (await this.keyFor(p.id))) continue;
+      for (const w of windows) {
+        if (/^http:\/\/127\.0\.0\.1:/.test(w.env.ANTHROPIC_BASE_URL)) continue; // holds the proxy's key, not the provider's
+        const key = servedBy(p, w.env) ? (isNative(p) ? w.env.ANTHROPIC_API_KEY : w.env.ANTHROPIC_AUTH_TOKEN || w.env.ANTHROPIC_API_KEY) : '';
+        if (key) {
+          await this.context.secrets.store(this.secretKey(p.id), key);
+          log(`provider ${p.name}: key recovered from a window's settings (left by Claude Parallel Accounts)`);
+          break;
+        }
+      }
+    }
+    if (!this.context.workspaceState.get<string>(ACTIVE_KEY) && this.settingsFile()) {
+      const own = windows.find((w) => path.normalize(w.dir) === path.normalize(path.dirname(this.settingsFile()!)));
+      const p = own && this.list().find((x) => chatCapable(x) && servedBy(x, own.env));
+      if (p) {
+        await this.context.workspaceState.update(ACTIVE_KEY, p.id);
+        log(`provider: this window runs ${p.name} (set up by Claude Parallel Accounts)`);
+        this.onDidChange.fire();
+      }
+    }
+  }
+
+  /** Providers whose key CPPO doesn't have (kept with the old extension): asked for, once per window. */
+  async promptMissingKeys(): Promise<void> {
+    const missing: Provider[] = [];
+    for (const p of this.list()) {
+      if (isCodex(p) && p.codexAuth !== 'api-key') continue; // Codex's own sign-in
+      if (!(await this.keyFor(p.id))) missing.push(p);
+    }
+    if (missing.length === 0) return;
+    const pick = await vscode.window.showWarningMessage(
+      `CPPO needs ${missing.length === 1 ? 'a key' : `${missing.length} keys`} again — ${missing.map((p) => p.name).join(', ')}. ` +
+        `VS Code kept ${missing.length === 1 ? 'it' : 'them'} with Claude Parallel Accounts, CPPO's old name, where CPPO can't read ${missing.length === 1 ? 'it' : 'them'}.`,
+      'Enter keys',
+      'Not now'
+    );
+    if (pick !== 'Enter keys') return;
+    for (const p of missing) {
+      const key = (
+        await vscode.window.showInputBox({
+          title: `Key for ${p.name}`,
+          prompt: isCodex(p) ? 'Your OpenAI API key (platform.openai.com/api-keys)' : isNative(p) ? 'Your Anthropic API key' : `The key for ${describeKind(p)}`,
+          password: true,
+          ignoreFocusOut: true,
+          validateInput: (v) => (v.trim() ? undefined : 'Enter the key'),
+        })
+      )?.trim();
+      if (!key) continue;
+      await this.context.secrets.store(this.secretKey(p.id), key);
+      log(`provider ${p.name}: key entered again`);
+    }
+    this.onDidChange.fire();
+    await this.sync();
+  }
+
   /** WorkerSource: this account's roles on this host, as the orchestration panel saved them. */
   rolePolicy(): RolePolicy | undefined {
     const email = this.email();
@@ -1182,6 +1271,12 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
     let provider = this.get(id);
     if (provider && provider.id !== id) await this.context.workspaceState.update(ACTIVE_KEY, provider.id);
     const key = provider ? await this.context.secrets.get(this.secretKey(provider.id)) : undefined;
+    if (provider && !key) {
+      // No key here (e.g. kept with CPPO's old name): the window's settings still work —
+      // leave them until the key is entered again (promptMissingKeys), don't drop the provider.
+      log(`provider sync: ${provider.name} has no key stored for CPPO yet — this window's settings are left as they are`);
+      return;
+    }
     if (provider && key) provider = await this.refreshCatalog(provider, key);
     let changed: boolean;
     try {
@@ -1212,7 +1307,7 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
         : `${provider.name}'s settings changed.`;
     log(`provider sync: ${what}`);
     const pick = await vscode.window.showInformationMessage(
-      `Claude Accounts: ${what} Reload the window to apply it to the Claude Code panel.`,
+      `CPPO: ${what} Reload the window to apply it to the Claude Code panel.`,
       'Reload window'
     );
     if (pick === 'Reload window') void vscode.commands.executeCommand('workbench.action.reloadWindow');
@@ -1237,7 +1332,7 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
     log(`claudeCode.environmentVariables sets ${found.join(', ')} for every window`);
     void vscode.window
       .showWarningMessage(
-        `Claude Accounts: the claudeCode.environmentVariables setting sets ${found.join(', ')} for EVERY ` +
+        `CPPO: the claudeCode.environmentVariables setting sets ${found.join(', ')} for EVERY ` +
           `window, so windows on "Anthropic" won't use their Anthropic login. Add it as a provider ` +
           `instead to choose it per window.`,
         'Open setting',
@@ -1257,7 +1352,7 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
   async switchInteractive(): Promise<void> {
     if (!this.settingsFile()) {
       vscode.window.showInformationMessage(
-        'Claude Accounts: this window has no account of its own yet. Sign in with Claude Code (or pick a ' +
+        'CPPO: this window has no account of its own yet. Sign in with Claude Code (or pick a ' +
           'saved account), then choose a provider.'
       );
       return;

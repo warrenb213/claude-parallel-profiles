@@ -9,7 +9,7 @@ import type { AgentTasks } from './agentTasks';
 import type { Transcripts } from './transcripts';
 
 /** Marketplace id — the hover links to the extension's own page with it. */
-const EXTENSION_ID = 'DercasDrol.claude-parallel-accounts';
+const EXTENSION_ID = 'warrenb213.cppo';
 
 /**
  * Status bar item showing the account bound to THIS window. The displayed
@@ -36,11 +36,11 @@ export class StatusBarManager implements vscode.Disposable {
     private readonly providers: ProviderManager
   ) {
     this.item = vscode.window.createStatusBarItem(
-      'claudeProfiles.status',
+      'cppo.status',
       vscode.StatusBarAlignment.Right,
       90
     );
-    this.item.command = 'claudeProfiles.showStatus';
+    this.item.command = 'cppo.showStatus';
     this.item.name = 'Claude Account';
     this.disposables.push(
       this.binding.onDidChange.event(() => {
@@ -160,12 +160,12 @@ export class StatusBarManager implements vscode.Disposable {
     // opens an empty settings page is worse than no gear at all.
     const links = [
       `[$(extensions) Extension](command:extension.open?${arg([EXTENSION_ID])} "Open the extension page")`,
-      `[$(output) Log](command:claudeProfiles.showLog "Show what this extension has been doing")`,
+      `[$(output) Log](command:cppo.showLog "Show what this extension has been doing")`,
     ].join(' &nbsp;·&nbsp; ');
 
     const body = sections.filter(Boolean).join('\n\n');
     const md = new vscode.MarkdownString(
-      `$(account) **Claude Parallel Accounts**\n\n${body}\n\n---\n\n${links}`
+      `$(account) **CPPO**\n\n${body}\n\n---\n\n${links}`
     );
     md.isTrusted = true;
     md.supportThemeIcons = true;
@@ -224,16 +224,16 @@ export class StatusBarManager implements vscode.Disposable {
       // The hover card is the FULL menu (incl. rare actions like Forget);
       // clicking the item fast-paths straight to the one meaningful action.
       const actions = [
-        !isSaved ? '[$(save) Save this account](command:claudeProfiles.captureAccount "Save it so you can switch back to it later")' : '',
-        hasOthers ? '[$(arrow-swap) Switch account](command:claudeProfiles.switchAccount "Pick another account for this window")' : '',
-        '[$(credit-card) Switch provider](command:claudeProfiles.switchProvider "Bill this window to its Anthropic login, an Anthropic API key, or a gateway such as Poe")',
+        !isSaved ? '[$(save) Save this account](command:cppo.captureAccount "Save it so you can switch back to it later")' : '',
+        hasOthers ? '[$(arrow-swap) Switch account](command:cppo.switchAccount "Pick another account for this window")' : '',
+        '[$(credit-card) Switch provider](command:cppo.switchProvider "Bill this window to its Anthropic login, an Anthropic API key, or a gateway such as Poe")',
         tasks?.lines.length
-          ? '[$(checklist) Agent tasks](command:claudeProfiles.showAgentTasks "Open a task\'s log or patch, or cancel it")'
+          ? '[$(checklist) Agent tasks](command:cppo.showAgentTasks "Open a task\'s log or patch, or cancel it")'
           : '',
-        workers.length ? '[$(graph) Usage](command:claudeProfiles.showUsage "How much of each worker provider\'s plan is used")' : '',
-        workers.length ? '[$(type-hierarchy) Orchestration](command:claudeProfiles.showOrchestration "Which models serve which work, at what effort, with what fallbacks")' : '',
+        workers.length ? '[$(graph) Usage](command:cppo.showUsage "How much of each worker provider\'s plan is used")' : '',
+        workers.length ? '[$(type-hierarchy) Orchestration](command:cppo.showOrchestration "Which models serve which work, at what effort, with what fallbacks")' : '',
         unique.length > 0
-          ? '[$(trash) Forget…](command:claudeProfiles.removeProfile "Sign the account out and remove it from the list")'
+          ? '[$(trash) Forget…](command:cppo.removeProfile "Sign the account out and remove it from the list")'
           : '',
       ].filter(Boolean);
       this.item.tooltip = this.card([
@@ -255,7 +255,7 @@ export class StatusBarManager implements vscode.Disposable {
           ? `$(organization) Workers: ${workers
               .map((w) => {
                 const n = this.transcripts?.count(w.id) ?? 0;
-                const link = `[${w.id}](command:claudeProfiles.showWorkerTranscripts?${encodeURIComponent(JSON.stringify([w.id]))} "Its tasks and consultations in this window")`;
+                const link = `[${w.id}](command:cppo.showWorkerTranscripts?${encodeURIComponent(JSON.stringify([w.id]))} "Its tasks and consultations in this window")`;
                 return `${link}${n ? ` (${n})` : ''}${w.agent ? ' _(+agent tasks)_' : ''}`;
               })
               .join(', ')}`
@@ -290,7 +290,7 @@ export class StatusBarManager implements vscode.Disposable {
           `saved here automatically — no extra step.`,
         `_If you ARE signed in, check that the \`claude\` CLI is on your PATH._`,
         this.registry.listUniqueByEmail().length > 0
-          ? '[$(arrow-swap) Switch account](command:claudeProfiles.switchAccount "Use one of your saved accounts in this window")'
+          ? '[$(arrow-swap) Switch account](command:cppo.switchAccount "Use one of your saved accounts in this window")'
           : '',
       ]);
       this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
@@ -333,7 +333,7 @@ export class StatusBarManager implements vscode.Disposable {
       // e.g. this window's account was forgotten but others exist. A bare
       // "go sign in" here would hide a one-click way out.
       if (this.registry.listUniqueByEmail().length > 0) {
-        await vscode.commands.executeCommand('claudeProfiles.switchAccount');
+        await vscode.commands.executeCommand('cppo.switchAccount');
         return;
       }
       vscode.window.showWarningMessage(
@@ -345,12 +345,12 @@ export class StatusBarManager implements vscode.Disposable {
     if (others.length > 0) {
       // There is something to switch to. (A new account is saved on its own by
       // reconcile; *Save* in the hover covers the rare case it wasn't.)
-      await vscode.commands.executeCommand('claudeProfiles.switchAccount');
+      await vscode.commands.executeCommand('cppo.switchAccount');
       return;
     }
     if (!savedByEmail) {
       // Nothing to switch to, current account not saved → saving is the only move.
-      await vscode.commands.executeCommand('claudeProfiles.captureAccount');
+      await vscode.commands.executeCommand('cppo.captureAccount');
       return;
     }
     // Single saved account and it's the current one — teach the next step.

@@ -9,7 +9,7 @@ import type { Consult, DelegateServer } from './delegate';
  * consultation records; a running task's transcript follows along.
  */
 
-const SCHEME = 'claude-accounts-transcript';
+const SCHEME = 'cppo-transcript';
 
 /** A fenced code block that the text itself can't close early. */
 export function fence(text: string, lang = ''): string {

@@ -38,24 +38,24 @@ function activateUnsupported(context: vscode.ExtensionContext): void {
   const label =
     process.platform === 'darwin' ? 'macOS' : process.platform === 'win32' ? 'native Windows' : process.platform;
   const msg =
-    `Claude Parallel Accounts supports Linux only for now — desktop Linux, WSL, Remote-SSH to a Linux ` +
+    `CPPO supports Linux only for now — desktop Linux, WSL, Remote-SSH to a Linux ` +
     `host, or a dev container. On ${label} it stays inactive: no files are read or written, no accounts ` +
     `are touched.` +
     (process.platform === 'win32' ? ' Tip: open your folder in a WSL window and install it there.' : '');
   log(`platform ${process.platform} is unsupported — inert mode, nothing will be touched`);
 
   const item = vscode.window.createStatusBarItem(
-    'claudeProfiles.status',
+    'cppo.status',
     vscode.StatusBarAlignment.Right,
     90
   );
   item.name = 'Claude Account';
   item.text = '$(account) Claude: unsupported OS';
-  const tooltip = new vscode.MarkdownString(`$(account) **Claude Parallel Accounts**\n\n${msg}`);
+  const tooltip = new vscode.MarkdownString(`$(account) **CPPO**\n\n${msg}`);
   tooltip.supportThemeIcons = true;
   item.tooltip = tooltip;
   item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
-  item.command = 'claudeProfiles.showStatus';
+  item.command = 'cppo.showStatus';
   item.show();
 
   // The commands stay registered so palette entries and keybindings don't die
@@ -63,33 +63,52 @@ function activateUnsupported(context: vscode.ExtensionContext): void {
   const explain = () => void vscode.window.showInformationMessage(msg);
   context.subscriptions.push(
     item,
-    vscode.commands.registerCommand('claudeProfiles.switchAccount', explain),
-    vscode.commands.registerCommand('claudeProfiles.captureAccount', explain),
-    vscode.commands.registerCommand('claudeProfiles.removeProfile', explain),
-    vscode.commands.registerCommand('claudeProfiles.switchProvider', explain),
-    vscode.commands.registerCommand('claudeProfiles.addProvider', explain),
-    vscode.commands.registerCommand('claudeProfiles.editProvider', explain),
-    vscode.commands.registerCommand('claudeProfiles.showStatus', explain),
-    vscode.commands.registerCommand('claudeProfiles.showLog', () => showLog())
+    vscode.commands.registerCommand('cppo.switchAccount', explain),
+    vscode.commands.registerCommand('cppo.captureAccount', explain),
+    vscode.commands.registerCommand('cppo.removeProfile', explain),
+    vscode.commands.registerCommand('cppo.switchProvider', explain),
+    vscode.commands.registerCommand('cppo.addProvider', explain),
+    vscode.commands.registerCommand('cppo.editProvider', explain),
+    vscode.commands.registerCommand('cppo.showStatus', explain),
+    vscode.commands.registerCommand('cppo.showLog', () => showLog())
   );
 }
 
-/** CPPO is installed: no accounts, no commands, no files — only a pointer to it. */
-function activateSuperseded(context: vscode.ExtensionContext): void {
-  const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
-  item.text = '$(info) Claude Parallel Accounts → CPPO';
-  item.tooltip =
-    'CPPO is installed and runs this window. This extension (its old name) is doing nothing; uninstall it — ' +
-    'this version leaves your accounts, providers and history in place when it is removed.';
+/** Where CPPO's releases are — the bridge release of the old extension is there too. */
+const RELEASES = 'https://github.com/warrenb213/cppo/releases';
+const OLD_ID = 'DercasDrol.claude-parallel-accounts';
+
+function versionBelow(v: string, min: string): boolean {
+  const a = v.split('.').map((x) => parseInt(x, 10) || 0);
+  const b = min.split('.').map((x) => parseInt(x, 10) || 0);
+  for (let i = 0; i < 3; i++) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) < (b[i] ?? 0);
+  return false;
+}
+
+/**
+ * The old extension (this product's former name) at a version that doesn't know
+ * CPPO: it runs too, and its uninstaller would delete the data CPPO uses. CPPO
+ * does nothing until it's updated to the bridge release (1.15.3) and removed.
+ */
+function activateBlockedByOld(context: vscode.ExtensionContext, version: string): void {
+  const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  item.text = '$(warning) CPPO: remove Claude Parallel Accounts';
+  item.tooltip = `Claude Parallel Accounts ${version} is still installed. CPPO stays idle until it is updated to 1.15.3 and uninstalled.`;
+  item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
   item.show();
   context.subscriptions.push(item);
+  log(`CPPO idle: Claude Parallel Accounts ${version} is installed`);
   void vscode.window
-    .showInformationMessage(
-      'CPPO has taken over from Claude Parallel Accounts. Uninstall the old extension — this version of it leaves your accounts, providers and history in place.',
-      'Show it'
+    .showWarningMessage(
+      `Claude Parallel Accounts ${version} — CPPO's old name — is still installed, so CPPO stays idle (both would claim this ` +
+        `window's account). Don't just uninstall it: that version's uninstaller deletes the accounts and history CPPO uses. ` +
+        `Install its final 1.15.3 from the CPPO releases first — it steps aside and leaves your data alone when removed — ` +
+        `then uninstall it and reload.`,
+      { modal: true },
+      'Open releases'
     )
     .then((pick) => {
-      if (pick) void vscode.commands.executeCommand('workbench.extensions.search', '@installed claude parallel accounts');
+      if (pick) void vscode.env.openExternal(vscode.Uri.parse(RELEASES));
     });
 }
 
@@ -98,12 +117,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     activateUnsupported(context);
     return;
   }
-  // CPPO (warrenb213.cppo) is this extension under its new name. With it installed,
-  // this copy steps aside entirely: two copies would both claim the window's
-  // CLAUDE_CONFIG_DIR, its commands and its workers server.
-  if (vscode.extensions.getExtension('warrenb213.cppo')) {
-    activateSuperseded(context);
-    return;
+  // The same product under its old name. From 1.15.3 it steps aside when CPPO is
+  // installed; before that it would run too — and its uninstaller delete our data.
+  const old = vscode.extensions.getExtension(OLD_ID);
+  if (old) {
+    const v = String((old.packageJSON as { version?: unknown } | undefined)?.version ?? '0');
+    if (versionBelow(v, '1.15.3')) {
+      activateBlockedByOld(context, v);
+      return;
+    }
+    void vscode.window
+      .showInformationMessage(
+        `CPPO has replaced Claude Parallel Accounts, which is still installed (doing nothing). Uninstall it — version ${v} leaves your accounts and history in place.`,
+        'Show it'
+      )
+      .then((pick) => {
+        if (pick) void vscode.commands.executeCommand('workbench.extensions.search', '@installed claude parallel accounts');
+      });
   }
 
   // Accounts, the repo map and the last-used account describe THIS host's disk,
@@ -180,7 +210,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const warnings = ensureSharedHistory(allDirs());
   if (warnings.length > 0) {
     vscode.window.showWarningMessage(
-      `Claude Accounts: shared history migration hit ${warnings.length} issue(s); ` +
+      `CPPO: shared history migration hit ${warnings.length} issue(s); ` +
         `will retry on next reload. First: ${warnings[0]}`
     );
   }
@@ -207,7 +237,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         } catch (err) {
           log(`ERROR in ${id}: ${(err as Error).stack ?? String(err)}`);
           const pick = await vscode.window.showErrorMessage(
-            `Claude Accounts: ${(err as Error).message}`,
+            `CPPO: ${(err as Error).message}`,
             'Show log'
           );
           if (pick === 'Show log') showLog();
@@ -221,19 +251,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   context.subscriptions.push(
-    cmd('claudeProfiles.switchAccount', () => wizard.switchAccountInteractive()),
-    cmd('claudeProfiles.captureAccount', () => wizard.captureCurrentAccount()),
-    cmd('claudeProfiles.removeProfile', () => wizard.removeAccountInteractive()),
-    cmd('claudeProfiles.showStatus', () => statusBar.onClick()),
-    cmd('claudeProfiles.showLog', () => showLog()),
-    cmd('claudeProfiles.switchProvider', () => providers.switchInteractive()),
-    cmd('claudeProfiles.addProvider', () => providers.addInteractive()),
-    cmd('claudeProfiles.editProvider', () => providers.editInteractive()),
-    cmd('claudeProfiles.showAgentTasks', () => agentTasks.showInteractive()),
+    cmd('cppo.switchAccount', () => wizard.switchAccountInteractive()),
+    cmd('cppo.captureAccount', () => wizard.captureCurrentAccount()),
+    cmd('cppo.removeProfile', () => wizard.removeAccountInteractive()),
+    cmd('cppo.showStatus', () => statusBar.onClick()),
+    cmd('cppo.showLog', () => showLog()),
+    cmd('cppo.switchProvider', () => providers.switchInteractive()),
+    cmd('cppo.addProvider', () => providers.addInteractive()),
+    cmd('cppo.editProvider', () => providers.editInteractive()),
+    cmd('cppo.showAgentTasks', () => agentTasks.showInteractive()),
     // The account hover links each task and worker to its transcripts.
-    cmd('claudeProfiles.showAgentTaskTranscript', (id?: string) => (id ? transcripts.openTask(id) : transcripts.pick())),
-    cmd('claudeProfiles.showWorkerTranscripts', (worker?: string) => transcripts.pick(worker)),
-    cmd('claudeProfiles.showOrchestration', () =>
+    cmd('cppo.showAgentTaskTranscript', (id?: string) => (id ? transcripts.openTask(id) : transcripts.pick())),
+    cmd('cppo.showWorkerTranscripts', (worker?: string) => transcripts.pick(worker)),
+    cmd('cppo.showOrchestration', () =>
       OrchestrationPanel.show({
         providers,
         workers,
@@ -243,7 +273,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         },
       })
     ),
-    cmd('claudeProfiles.showUsage', async () => {
+    cmd('cppo.showUsage', async () => {
       const report = await workers.usageReport();
       const doc = await vscode.workspace.openTextDocument({ content: `Provider usage\n\n${report}\n`, language: 'plaintext' });
       await vscode.window.showTextDocument(doc, { preview: true });
@@ -278,9 +308,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   if (conflicts.length > 0) {
     void vscode.window
       .showErrorMessage(
-        `Claude Accounts: another extension already owns ${conflicts.length} of this extension's ` +
+        `CPPO: another extension already owns ${conflicts.length} of this extension's ` +
           `commands — most likely a duplicate copy under a different publisher ` +
-          `(e.g. "tundak.claude-parallel-accounts"). Uninstall the duplicate and reload the window.`,
+          `(e.g. an older copy of this extension under another name). Uninstall the duplicate and reload the window.`,
         'Show extensions'
       )
       .then((pick) => {
@@ -292,7 +322,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   if (cleared) {
     vscode.window.showInformationMessage(
-      'Claude Accounts: removed CLAUDE_CONFIG_DIR from the shared machine setting. ' +
+      'CPPO: removed CLAUDE_CONFIG_DIR from the shared machine setting. ' +
         'Isolation now works per-window. Pick this window\'s account from the status bar.'
     );
   }
@@ -323,8 +353,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   statusBar.setAgentTasks(agentTasks, transcripts, workers.onDidConsult.event);
   context.subscriptions.push(workers, agentTasks, transcripts);
   void providers.migrate().then(async () => {
+    // Keys and this window's provider, left by CPPO's old name where we can't read them.
+    await providers.adoptFromOldExtension().catch((err) => log(`adopting from Claude Parallel Accounts failed: ${(err as Error).message}`));
     await providers.sync();
     await workers.reconcile();
+    void providers.promptMissingKeys();
   });
   providers.warnAboutSharedOverride();
 
@@ -338,10 +371,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // the news must come with the way out attached, not read as a dead end.
     const canSwitch = !binding.getActiveName() && registry.listUniqueByEmail().length > 0;
     void vscode.window
-      .showInformationMessage(`Claude Accounts: ${notice}`, ...(canSwitch ? ['Switch account'] : []))
+      .showInformationMessage(`CPPO: ${notice}`, ...(canSwitch ? ['Switch account'] : []))
       .then((pick) => {
         if (pick === 'Switch account') {
-          void vscode.commands.executeCommand('claudeProfiles.switchAccount');
+          void vscode.commands.executeCommand('cppo.switchAccount');
         }
       });
   }
@@ -354,7 +387,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     if (!context.globalState.get<boolean>(key, false)) {
       await context.globalState.update(key, true);
       vscode.window.showInformationMessage(
-        'Claude Accounts: no accounts detected yet. Sign in with Claude Code (Account menu → Login, ' +
+        'CPPO: no accounts detected yet. Sign in with Claude Code (Account menu → Login, ' +
           'or /login in a chat) and this window will remember the account automatically.'
       );
     }

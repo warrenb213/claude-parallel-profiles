@@ -36,7 +36,7 @@ export class OrchestrationPanel {
       void OrchestrationPanel.current.post();
       return;
     }
-    const panel = vscode.window.createWebviewPanel('claudeProfiles.orchestration', 'Orchestration — Claude Accounts', vscode.ViewColumn.Active, {
+    const panel = vscode.window.createWebviewPanel('cppo.orchestration', 'Orchestration — CPPO', vscode.ViewColumn.Active, {
       enableScripts: true,
       retainContextWhenHidden: true,
       localResourceRoots: [],
@@ -89,7 +89,7 @@ export class OrchestrationPanel {
         await this.deps.providers.saveRolePolicy(undefined);
         await this.post();
       } else if (m.type === 'command') {
-        const allowed = ['claudeProfiles.addProvider', 'claudeProfiles.editProvider', 'claudeProfiles.showUsage', 'claudeProfiles.showWorkerTranscripts'];
+        const allowed = ['cppo.addProvider', 'cppo.editProvider', 'cppo.showUsage', 'cppo.showWorkerTranscripts'];
         if (allowed.includes(m.id)) await vscode.commands.executeCommand(m.id);
       }
     } catch (err) {
@@ -240,7 +240,7 @@ function renderInventory() {
     $('table', {}, ...S.offers.filter((o) => o.providerName === p.name).map((o) => $('tr', { class: o.unavailable ? 'err' : '' }, $('td', {}, $('b', {}, o.model)), $('td', {}, ...caps(o)), $('td', {}, status(o), o.unavailable ? ' — ' + o.unavailable : '', ...o.limits.map((l) => $('div', { class: 'muted' }, l)))))),
     p.usage ? $('div', {}, ...p.usage.windows.map((x) => $('div', { class: 'row' }, $('span', { class: 'muted' }, x.label), $('div', { class: 'track' }, $('div', { class: 'bar', style: 'width:' + Math.min(100, x.usedPct) + '%' })), $('span', { class: x.usedPct >= 90 ? 'warn' : '' }, Math.round(x.usedPct) + '%'), x.resetsAt ? $('span', { class: 'muted' }, 'resets in ' + until(x.resetsAt)) : null)), $('div', { class: 'muted' }, p.usage.source)) : $('div', { class: 'muted' }, p.name === 'Anthropic login' ? "No usage report from Claude Code yet — it caches one as you use it (/usage)." : 'No plan usage reported.')));
   inv.replaceChildren($('div', { class: 'grid' }, acct, ...provs),
-    S.offers.length ? null : $('p', {}, 'No providers yet. ', $('a', { onclick: () => vscode.postMessage({ type: 'command', id: 'claudeProfiles.editProvider' }) }, 'Enable workers'), ' on a provider, or ', $('a', { onclick: () => vscode.postMessage({ type: 'command', id: 'claudeProfiles.addProvider' }) }, 'add one'), '.'));
+    S.offers.length ? null : $('p', {}, 'No providers yet. ', $('a', { onclick: () => vscode.postMessage({ type: 'command', id: 'cppo.editProvider' }) }, 'Enable workers'), ' on a provider, or ', $('a', { onclick: () => vscode.postMessage({ type: 'command', id: 'cppo.addProvider' }) }, 'add one'), '.'));
 }
 function renderThresholds() {
   const t = document.getElementById('thresholds');

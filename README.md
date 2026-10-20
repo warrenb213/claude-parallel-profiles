@@ -1,16 +1,14 @@
-# Claude Parallel Accounts
+# CPPO — Claude Parallel Profile Orchestration
 
-[![Release](https://img.shields.io/github/v/release/warrenb213/claude-parallel-profiles?label=release)](https://github.com/warrenb213/claude-parallel-profiles/releases/latest)
+[![Release](https://img.shields.io/github/v/release/warrenb213/cppo?label=release)](https://github.com/warrenb213/cppo/releases/latest)
 [![Platform: Linux](https://img.shields.io/badge/platform-Linux%20%7C%20WSL%20%7C%20SSH-orange.svg)](#requirements)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**A companion for the [Claude Code extension for VS Code](https://marketplace.visualstudio.com/items?itemName=anthropic.claude-code): a different Claude account in each VS Code window, at the same time, with one shared conversation history — and, per window, a choice of who serves and bills the requests, plus other models the window's AI can hand work to.**
+**Make Claude Code the lead of a multi-model team.** The Claude in your chat hands focused questions and real, sandboxed coding work to the other models you use — GLM on Z.ai, GPT through OpenAI Codex, Claude on your own plan — routes each kind of work by rules you set once, and reviews every change before it reaches your code. Underneath: a different Claude account in each VS Code window, with one shared conversation history.
 
-Claude Code signs you into **one** account, shared by every window. This extension gives **each window its own account** (personal and work, or separate organizations), keeps your conversations in one history across all of them, and lets each window bill to its Anthropic login, an Anthropic API key, or a gateway such as Z.ai. The window's Claude can also consult or delegate real work to other models you enable — GLM on Z.ai, GPT through OpenAI Codex, or Claude on your own subscription — and you review what they change before it lands.
+It's a **companion** for the [Claude Code extension for VS Code](https://marketplace.visualstudio.com/items?itemName=anthropic.claude-code), not a replacement: Claude Code must be installed, and stays the tool you work in.
 
-It's a **companion**, not a replacement: the official Claude Code extension must be installed.
-
-> **About this fork.** This is [warrenb213/claude-parallel-profiles](https://github.com/warrenb213/claude-parallel-profiles), a fork of [DercasDrol/claude-parallel-profiles](https://github.com/DercasDrol/claude-parallel-profiles). Upstream (1.3.x, on the Marketplace) provides the per-window accounts and shared history. This fork adds [providers](#providers) (Anthropic API keys, Z.ai, Poe, OpenAI Codex, custom gateways), [workers](#workers) and [agent tasks](#agent-tasks-real-work-reviewed-by-the-lead) on those providers, and [orchestration](#orchestration-roles-and-fallbacks) — roles with fallback chains across your subscriptions. It is installed from a `.vsix` on [GitHub Releases](https://github.com/warrenb213/claude-parallel-profiles/releases) — never published to the Marketplace. See [Install](#install).
+> **About CPPO.** CPPO began as a fork of [Claude Parallel Accounts](https://github.com/DercasDrol/claude-parallel-profiles) by DercasDrol (MIT), which provides the per-window accounts and shared history; providers, workers, agent tasks and orchestration are CPPO's own, and it is now a separate project. It's installed from a `.vsix` on [GitHub Releases](https://github.com/warrenb213/cppo/releases) — never published to the Marketplace. Coming from Claude Parallel Accounts? See [Moving from Claude Parallel Accounts](#moving-from-claude-parallel-accounts).
 
 > **Linux only (for now).** Desktop Linux, **WSL**, **Remote-SSH** to a Linux host, and dev containers. The check happens where the extension runs — in a WSL or SSH window that's the Linux *remote* — so a Windows or macOS desktop driving a Linux remote is fully supported. On macOS and native Windows the extension stays completely **inert**: no files read or written, no accounts touched; the status bar says why. (Claude Code stores credentials differently there, e.g. in the macOS Keychain, and guessing would be worse than declining.)
 
@@ -18,7 +16,7 @@ It's a **companion**, not a replacement: the official Claude Code extension must
 
 ## Contents
 
-- [The idea in 30 seconds](#the-idea-in-30-seconds) · [What each provider can do](#what-each-provider-can-do) · [A setup in practice](#a-setup-in-practice)
+- [Why it matters for agentic work](#why-it-matters-for-agentic-work) · [What each provider can do](#what-each-provider-can-do) · [A setup in practice](#a-setup-in-practice)
 - [Architecture](#architecture) · [Requirements](#requirements) · [Install](#install)
 - [Accounts](#accounts) · [One conversation history](#one-conversation-history)
 - [Providers](#providers) · [Workers](#workers) · [Orchestration: roles and fallbacks](#orchestration-roles-and-fallbacks) · [Seeing what workers did](#seeing-what-workers-did)
@@ -27,17 +25,24 @@ It's a **companion**, not a replacement: the official Claude Code extension must
 
 ---
 
-## The idea in 30 seconds
+## Why it matters for agentic work
 
-- **Sign in as usual**, through Claude Code's own account menu or `/login`. The extension notices and saves the account by itself; the account *is* its email.
-- **Each window picks its account** from the status bar. Two windows run two accounts at once — no logout/login dance. The window's integrated terminals get the same account.
-- **Switching reloads the window.** Claude Code reads its account once at start-up, so only a reload makes it both *show* and *bill* the account you picked.
-- **History stays one whole.** Move between your accounts — say, personal and work — and your conversations come with you.
-- **Each window picks its provider too:** the account's Anthropic login (the default), an Anthropic API key, or a gateway such as Z.ai's GLM Coding Plan.
-- **Workers:** the window's Claude can ask other models you enabled for answers, or have them do real work in a scratch copy of your repo, which it reviews before applying — including GPT through **OpenAI Codex**, on your ChatGPT plan, and 2D art from Codex's image generation.
-- **Orchestration:** you decide once which models serve which kind of work — reviews, implementation, hard questions, art — at what effort, and what takes over when a plan runs low. The lead asks by role; the extension picks, the same way every time, and says who served.
-- **Usage awareness:** each plan's 5-hour and weekly windows (Anthropic, Codex, Z.ai) are read without spending anything, shown in the hover and the orchestration panel, and used to balance work across the different services you use.
-- **Forget really signs out**, and **uninstalling really cleans up**: your history goes back into the default `~/.claude`, your last account stays signed in there.
+- **One lead, a team of specialists.** Claude stays in charge of the conversation and delegates the rest: implementation and test-fixing to GLM, reviews and second opinions to GPT, the hardest questions to the strongest model you have, sprites and icons to Codex's image generation — each on a service you already use. [Workers →](#workers)
+- **Real work, isolated.** An agent task runs headless in a scratch **git worktree** of your repo (HEAD plus your uncommitted changes), with a fresh config — none of your login, plugins or MCP servers — and your dependency folders linked in so it can build and run the tests. [Agent tasks →](#agent-tasks-real-work-reviewed-by-the-lead)
+- **Nothing lands unreviewed.** Every task comes back as a report and a diff; only the lead applies it, to the working tree, unstaged — and a chain of tasks applies all of it or none of it.
+- **Predictable routing, not model roulette.** You set once which models serve which kind of work — *review*, *implement*, *hard-reasoning*, *2d-art*… — in what order and at what effort. The lead asks by role; the extension picks the same way every time and says who served and what it passed over. [Orchestration →](#orchestration-roles-and-fallbacks)
+- **Aware of every plan, without spending to check.** Each plan's 5-hour and weekly windows come from Claude Code's and Codex's own reports (and Z.ai's monitor); when one service is near its threshold, work goes to the next service in the role's chain.
+- **Long work that survives.** Tasks get hours, not minutes; a run stopped at a limit keeps its changes, and a follow-up continues where it left off. Pipelines — fix → test → docs — queue in one go.
+- **Models that consult each other.** GLM can ask Claude for a second opinion in the middle of a task — answers only, through a token that can't start tasks of its own.
+- **Everything visible.** Live transcripts of every run and consultation, one click from the status bar: each command, each edit, the report, the diff, and which model did it.
+- **Your credentials stay yours.** Provider keys live in VS Code's secret storage; a subscription is only ever used by its own client (Claude Code, Codex); the servers involved listen on `127.0.0.1` only; no telemetry. [Privacy →](#privacy--your-data)
+
+**The foundation: an account per window.**
+
+- **Each window runs its own Claude account** — personal and work, or separate organizations, side by side — picked from the status bar; sign in as usual (`/login`) and it's saved by itself. Its terminals follow it.
+- **One history across all of them.** Move between your accounts and your conversations come with you.
+- **Each window picks who serves and bills its chat:** the account's Anthropic login (the default), an Anthropic API key, or a gateway such as Z.ai's GLM Coding Plan. Switching reloads the window, because Claude Code reads its account and provider once at start-up.
+- **Forget really signs out, and uninstalling really cleans up:** your history goes back into the default `~/.claude`, and your last account stays signed in there.
 
 ---
 
@@ -61,7 +66,7 @@ One person, three subscriptions — **Claude Max** (Anthropic login), **Z.ai GLM
 
 1. Claude Max is each window's provider: it **leads**.
 2. *Add a Provider → Z.ai GLM Coding Plan* and *→ OpenAI Codex → ChatGPT plan* (sign in to Codex when asked).
-3. *Claude Accounts: Orchestration → Suggest from all models → Save*: the template puts implementation and test-fixing on GLM, reviews and second opinions on Codex, hard questions on Opus or Astra, 2D art on Codex — each with fallbacks on another provider. Saving enables those models as workers after one confirmation.
+3. *CPPO: Orchestration → Suggest from all models → Save*: the template puts implementation and test-fixing on GLM, reviews and second opinions on Codex, hard questions on Opus or Astra, 2D art on Codex — each with fallbacks on another provider. Saving enables those models as workers after one confirmation.
 
 Then, in any chat:
 
@@ -98,7 +103,7 @@ Every VS Code window runs its own extension host, so its environment is its own.
 ```mermaid
 flowchart TB
   subgraph win["VS Code window (its own extension host)"]
-    ext["Claude Parallel Accounts"]
+    ext["CPPO"]
     cc["Claude Code extension<br/>(chat sessions)"]
     term["Integrated terminals"]
     mcp["Workers MCP server<br/>127.0.0.1"]
@@ -169,13 +174,21 @@ flowchart TB
 
 ## Install
 
-1. **Get the `.vsix`** from the [latest release](https://github.com/warrenb213/claude-parallel-profiles/releases/latest) (`claude-parallel-accounts-<version>.vsix`), or build it yourself (`npm ci && npm run package`, see [Development](#development--releases)).
-2. **Install it** where the extension runs: in the window itself (a WSL or SSH window installs on the remote), *Extensions → ⋯ → Install from VSIX…*, or `code --install-extension claude-parallel-accounts-<version>.vsix`. Reload the window.
+1. **Get the `.vsix`** from the [latest release](https://github.com/warrenb213/cppo/releases/latest) (`cppo-<version>.vsix`), or build it yourself (`npm ci && npm run package`, see [Development](#development--releases)).
+2. **Install it** where the extension runs: in the window itself (a WSL or SSH window installs on the remote), *Extensions → ⋯ → Install from VSIX…*, or `code --install-extension cppo-<version>.vsix`. Reload the window.
 3. **You're probably already signed in.** The status bar shows your email; the account is saved automatically.
 4. **Add another account:** in Claude Code, sign in as it (account menu, or `/login`). The extension saves it and reloads the window onto it; the previous account stays in the list.
 5. **Give each window its account:** status bar → *Switch account*. Another window, another account — both run in parallel.
 
-The fork keeps upstream's extension ID (`DercasDrol.claude-parallel-accounts`), so it replaces an upstream install. The Marketplace's upstream version (1.3.x) is lower, so VS Code won't swap it back; if upstream ever publishes a higher one, turn off *Auto Update* for this extension.
+CPPO's extension ID is `warrenb213.cppo`: it has no Marketplace listing, so nothing else can update over it.
+
+### Moving from Claude Parallel Accounts
+
+CPPO replaces Claude Parallel Accounts (`DercasDrol.claude-parallel-accounts` — this project's earlier name, and the original it was built from) under a new ID, `warrenb213.cppo`, so VS Code sees two extensions. Your accounts, providers, roles and history live in `~/.claude-*` and carry over; three things need care:
+
+1. **Update the old extension to 1.15.3 first** (from [CPPO's releases](https://github.com/warrenb213/cppo/releases/tag/v1.15.3)), then install CPPO, then uninstall the old one. Earlier versions of the old extension don't know CPPO, and **their uninstaller deletes the account folders and history CPPO uses**; 1.15.3 steps aside while CPPO is installed and its uninstaller leaves everything in place. If CPPO finds an older copy, it stays idle and says so.
+2. **Provider keys:** VS Code keeps secrets per extension, so CPPO can't read the old one's. It recovers the keys a window's settings still hold (gateways such as Z.ai, Anthropic API keys) and asks once for the rest (keys behind the local proxy, OpenAI API keys). Codex on a ChatGPT plan needs nothing: it's Codex's own sign-in.
+3. **Each window's provider** is recognised from the window's settings; the workers server is now named `cppo` (tools `mcp__cppo__…`), and the old one's entry is removed from each window's Claude Code config. New Claude Code sessions pick it up.
 
 ---
 
@@ -269,9 +282,9 @@ flowchart LR
   P -- "translated both ways;<br/>Claude models pass through" --> G
 ```
 
-**Switching** (hover → *Switch provider*, or *Claude Accounts: Switch Provider for This Window*) writes the provider's settings into the window's own `settings.json` and reloads the window; terminals follow it. **To go back to Anthropic from anything else, pick *Anthropic*** — the settings the provider took over are restored as they were.
+**Switching** (hover → *Switch provider*, or *CPPO: Switch Provider for This Window*) writes the provider's settings into the window's own `settings.json` and reloads the window; terminals follow it. **To go back to Anthropic from anything else, pick *Anthropic*** — the settings the provider took over are restored as they were.
 
-**Adding** (*Claude Accounts: Add a Provider*) lists the presets first, so a preset asks only for a key. A new provider is tested right away with one tiny request, sent the way Claude Code sends it, so a wrong key or an empty balance shows up then rather than mid-chat; it's then offered for this window. *Edit or Remove a Provider* replaces a key, renames or removes a provider, runs the test again, and for gateways changes the URL, the default models, beta headers, non-Claude models and workers.
+**Adding** (*CPPO: Add a Provider*) lists the presets first, so a preset asks only for a key. A new provider is tested right away with one tiny request, sent the way Claude Code sends it, so a wrong key or an empty balance shows up then rather than mid-chat; it's then offered for this window. *Edit or Remove a Provider* replaces a key, renames or removes a provider, runs the test again, and for gateways changes the URL, the default models, beta headers, non-Claude models and workers.
 
 **Providers belong to one account on one host.** A provider is seen only by windows running that same Claude account on that same host; the same account on another host adds its own.
 
@@ -332,7 +345,7 @@ flowchart TB
 
 ### Orchestration: roles and fallbacks
 
-Instead of picking a model each time, the lead asks for a **role** — `delegate(role: "review")`, `start_task(role: "implement")` — and the extension decides who serves it, the same way every time, from chains you set in *Claude Accounts: Orchestration* (also in the account's hover).
+Instead of picking a model each time, the lead asks for a **role** — `delegate(role: "review")`, `start_task(role: "implement")` — and the extension decides who serves it, the same way every time, from chains you set in *CPPO: Orchestration* (also in the account's hover).
 
 | Category | Role | Tool | For |
 | --- | --- | --- | --- |
@@ -447,8 +460,8 @@ stateDiagram-v2
 
 The account's hover card lists the workers and the recent tasks: worker, progress and current action while running; files changed and whether applied when done; why it stopped.
 
-- **Transcripts.** A task's worker name in the hover opens that task's transcript; a worker under *Workers* (with a count) lists its tasks and consultations in this window. Transcripts open in the Markdown preview. A task's shows its run — messages, each tool call with its command or edit, results and thinking collapsed, the report and changes — and follows along while it runs; a consultation's shows the question, context and answer. Also *Claude Accounts: Show Worker Transcripts*. Consultations are kept in memory only, the latest 50.
-- **Usage.** `provider_usage` (for the lead and for runs) and *Claude Accounts: Show Provider Usage* report how much of each plan is used, so work can be balanced across the different services you use: the Anthropic login's 5-hour, weekly and per-model weekly windows (from the usage report Claude Code caches in this account's windows — just a file read — and its rate-limit reports on login-worker calls), the ChatGPT plan's Codex windows (from Codex itself, without sending a message), Z.ai's Coding Plan windows (from its quota monitor — unofficial, may change), and this window's calls, tasks and tokens per worker.
+- **Transcripts.** A task's worker name in the hover opens that task's transcript; a worker under *Workers* (with a count) lists its tasks and consultations in this window. Transcripts open in the Markdown preview. A task's shows its run — messages, each tool call with its command or edit, results and thinking collapsed, the report and changes — and follows along while it runs; a consultation's shows the question, context and answer. Also *CPPO: Show Worker Transcripts*. Consultations are kept in memory only, the latest 50.
+- **Usage.** `provider_usage` (for the lead and for runs) and *CPPO: Show Provider Usage* report how much of each plan is used, so work can be balanced across the different services you use: the Anthropic login's 5-hour, weekly and per-model weekly windows (from the usage report Claude Code caches in this account's windows — just a file read — and its rate-limit reports on login-worker calls), the ChatGPT plan's Codex windows (from Codex itself, without sending a message), Z.ai's Coding Plan windows (from its quota monitor — unofficial, may change), and this window's calls, tasks and tokens per worker.
 
 ### OpenAI Codex as a worker
 
@@ -495,7 +508,7 @@ flowchart LR
 
 ## Commands
 
-All under **Claude Accounts** in the Command Palette; most are also in the status bar hover.
+All under **CPPO** in the Command Palette; most are also in the status bar hover.
 
 | Command | What it does |
 | --- | --- |
@@ -636,12 +649,10 @@ npm run compile   # typecheck + build
 npm run package   # build the .vsix (production bundle)
 ```
 
-**Releases of this fork** are [GitHub Releases](https://github.com/warrenb213/claude-parallel-profiles/releases): a `v<version>` tag with the `.vsix` built by `npm run package` attached, and the version's `CHANGELOG.md` entry as its notes. They're made by hand — `gh release create v<version> claude-parallel-accounts-<version>.vsix --notes-file …` — and installed by hand ([Install](#install)). The fork **never publishes to the Marketplace or Open VSX**: GitHub Actions are disabled on it, and the publish steps in [`release.yml`](.github/workflows/release.yml) only run in the upstream repository.
-
-Upstream's workflows, for reference: [`ci.yml`](.github/workflows/ci.yml) builds the `.vsix` on every push and PR to `main`; [`release.yml`](.github/workflows/release.yml), on a `v*` tag, creates a GitHub Release with the `.vsix` and publishes to the VS Code Marketplace and Open VSX.
+**Releases** are [GitHub Releases](https://github.com/warrenb213/cppo/releases): a `v<version>` tag with `cppo-<version>.vsix` (built by `npm run package`) attached, and the version's `CHANGELOG.md` entry as its notes. They're made by hand — `gh release create v<version> cppo-<version>.vsix --notes-file …` — and installed by hand ([Install](#install)). CPPO is **never published to the Marketplace or Open VSX**: GitHub Actions are disabled on the repository, and the publish steps in the workflow files inherited from the original project ([`ci.yml`](.github/workflows/ci.yml), [`release.yml`](.github/workflows/release.yml)) only run in that project's repository.
 
 ---
 
 ## License
 
-MIT License — see [LICENSE](LICENSE). Per-window accounts and shared history by [DercasDrol](https://github.com/DercasDrol/claude-parallel-profiles); providers, workers and agent tasks added in this fork.
+MIT License — see [LICENSE](LICENSE). CPPO is based on [Claude Parallel Accounts](https://github.com/DercasDrol/claude-parallel-profiles) by DercasDrol, whose per-window accounts and shared history it builds on; providers, workers, agent tasks and orchestration are CPPO's.

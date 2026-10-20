@@ -74,7 +74,9 @@ export interface WorkerSource {
 
 export const LOGIN_PROVIDER = 'Anthropic login';
 
-const SERVER_NAME = 'claude-accounts-workers';
+const SERVER_NAME = 'cppo';
+/** What Claude Parallel Accounts (CPPO's old name) registered — removed where found. */
+const LEGACY_SERVER_NAME = 'claude-accounts-workers';
 /** Caps per call — a worker is for focused questions, not for shipping the repo. */
 const MAX_CONTEXT_CHARS = 120_000;
 const MAX_OUTPUT_TOKENS = 8_192;
@@ -663,7 +665,7 @@ export class DelegateServer implements vscode.Disposable {
       return {
         error:
           `No worker can serve role "${roleId}" now` +
-          (r.skipped.length ? `: ${r.skipped.map((s) => `${s.worker} — ${s.reason}`).join('; ')}` : ' — its chain is empty (Claude Accounts: Orchestration).'),
+          (r.skipped.length ? `: ${r.skipped.map((s) => `${s.worker} — ${s.reason}`).join('; ')}` : ' — its chain is empty (CPPO: Orchestration).'),
       };
     }
     return { ...r, role: roleId };
@@ -823,11 +825,14 @@ function register(dir: string, entry: Json | undefined): void {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return;
   }
   const servers = { ...((config.mcpServers as Json | undefined) ?? {}) };
+  // The same server under the old extension's name: its port and token are dead.
+  const legacy = LEGACY_SERVER_NAME in servers;
+  delete servers[LEGACY_SERVER_NAME];
   if (entry) {
-    if (JSON.stringify(servers[SERVER_NAME]) === JSON.stringify(entry)) return;
+    if (!legacy && JSON.stringify(servers[SERVER_NAME]) === JSON.stringify(entry)) return;
     servers[SERVER_NAME] = entry;
   } else {
-    if (!(SERVER_NAME in servers)) return;
+    if (!legacy && !(SERVER_NAME in servers)) return;
     delete servers[SERVER_NAME];
   }
   config.mcpServers = servers;
