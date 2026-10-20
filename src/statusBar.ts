@@ -7,9 +7,9 @@ import { defaultSourceDir } from './capture';
 import { ProviderManager, describeLogin, describeModels } from './providers';
 import type { AgentTasks } from './agentTasks';
 import type { Transcripts } from './transcripts';
+import { selfId } from './copies';
 
 /** Marketplace id — the hover links to the extension's own page with it. */
-const EXTENSION_ID = 'warrenb213.cppo';
 
 /**
  * Status bar item showing the account bound to THIS window. The displayed
@@ -159,7 +159,7 @@ export class StatusBarManager implements vscode.Disposable {
     // No "Settings" link: the extension deliberately has none, and a gear that
     // opens an empty settings page is worse than no gear at all.
     const links = [
-      `[$(extensions) Extension](command:extension.open?${arg([EXTENSION_ID])} "Open the extension page")`,
+      `[$(extensions) Extension](command:extension.open?${arg([selfId || 'beboutit503.cppo'])} "Open the extension page")`,
       `[$(output) Log](command:cppo.showLog "Show what this extension has been doing")`,
     ].join(' &nbsp;·&nbsp; ');
 

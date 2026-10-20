@@ -79,11 +79,21 @@ const outOfTime = () => Date.now() > deadline;
  * what is on its way out).
  */
 /**
- * Folder-name prefixes of every copy that shares this data: this product under
- * its old name (Claude Parallel Accounts) and its new one (CPPO). Either one
- * installed means the data is still in use — by it.
+ * Another copy of this product shares this data (see src/copies.ts): any
+ * sibling extension whose package.json carries the `cppo` mark, or one of the
+ * IDs it had before the mark existed. Either installed means the data is still
+ * in use — by it.
  */
-const PRODUCT_PREFIXES = ['dercasdrol.claude-parallel-accounts-', 'warrenb213.cppo-'];
+const KNOWN_PREFIXES = ['dercasdrol.claude-parallel-accounts-', 'warrenb213.cppo-', 'beboutit503.cppo-'];
+
+function isCopy(dir, name) {
+  if (KNOWN_PREFIXES.some((p) => name.toLowerCase().startsWith(p))) return true;
+  try {
+    return Boolean(JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf-8')).cppo);
+  } catch {
+    return false;
+  }
+}
 
 function anotherCopyInstalled() {
   try {
@@ -99,7 +109,7 @@ function anotherCopyInstalled() {
       (e) =>
         e.isDirectory() &&
         e.name !== me &&
-        PRODUCT_PREFIXES.some((p) => e.name.toLowerCase().startsWith(p)) &&
+        isCopy(path.join(root, e.name), e.name) &&
         !obsolete[e.name]
     );
   } catch {

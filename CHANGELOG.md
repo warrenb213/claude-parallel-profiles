@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.17.0 — 2026-10-20
+
+### Changed
+
+- **Publisher `beboutit503`:** CPPO's extension ID is now `beboutit503.cppo`, the publisher it will have on the Marketplace. Accounts, providers, roles and history carry over; provider keys are recovered from window settings or asked for once (VS Code keeps secrets per extension).
+- **No more bridges after this one.** Every copy now carries a mark in its `package.json` — `"cppo": { "generation": N }` (3 here). The newest generation runs and older marked copies step aside on their own; an uninstaller keeps the shared data while any other marked copy (or a known earlier ID) is installed. CPPO stays idle beside an older copy without the mark, whose uninstaller would delete its data, and says which bridge to install.
+- **Bridge releases for the earlier IDs**, the same code under the old identity with the mark: `warrenb213.cppo` **1.16.2** (generation 2) and `DercasDrol.claude-parallel-accounts` **1.15.4** (generation 1). Install the one for the copy you have, then CPPO, then uninstall the old copy.
+- README: *Moving from an earlier copy* covers both earlier IDs; it no longer says CPPO will never be on the Marketplace.
+
 ## 1.16.1 — 2026-10-20
 
 ### Changed

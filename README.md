@@ -9,7 +9,7 @@
 
 It's a **companion** for the [Claude Code extension for VS Code](https://marketplace.visualstudio.com/items?itemName=anthropic.claude-code), not a replacement: Claude Code must be installed, and stays the tool you work in.
 
-> **About CPPO.** CPPO began as a fork of [Claude Parallel Accounts](https://github.com/DercasDrol/claude-parallel-profiles) by DercasDrol (MIT), which provides the per-window accounts and shared history; providers, workers, agent tasks and orchestration are CPPO's own, and it is now a separate project. It's installed from a `.vsix` on [GitHub Releases](https://github.com/warrenb213/cppo/releases) — never published to the Marketplace. Coming from Claude Parallel Accounts? See [Moving from Claude Parallel Accounts](#moving-from-claude-parallel-accounts).
+> **About CPPO.** CPPO began as a fork of [Claude Parallel Accounts](https://github.com/DercasDrol/claude-parallel-profiles) by DercasDrol (MIT), which provides the per-window accounts and shared history; providers, workers, agent tasks and orchestration are CPPO's own, and it is now a separate project. It's installed from a `.vsix` on [GitHub Releases](https://github.com/warrenb213/cppo/releases). Coming from Claude Parallel Accounts, or an earlier CPPO? See [Moving from an earlier copy](#moving-from-an-earlier-copy).
 
 > **Linux only (for now).** Desktop Linux, **WSL**, **Remote-SSH** to a Linux host, and dev containers. The check happens where the extension runs — in a WSL or SSH window that's the Linux *remote* — so a Windows or macOS desktop driving a Linux remote is fully supported. On macOS and native Windows the extension stays completely **inert**: no files read or written, no accounts touched; the status bar says why. (Claude Code stores credentials differently there, e.g. in the macOS Keychain, and guessing would be worse than declining.)
 
@@ -121,15 +121,22 @@ Every VS Code window runs its own extension host, so its environment is its own.
 4. **Add another account:** in Claude Code, sign in as it (account menu, or `/login`). The extension saves it and reloads the window onto it; the previous account stays in the list.
 5. **Give each window its account:** status bar → *Switch account*. Another window, another account — both run in parallel.
 
-CPPO's extension ID is `warrenb213.cppo`: it has no Marketplace listing, so nothing else can update over it.
+CPPO's extension ID is `beboutit503.cppo`.
 
-### Moving from Claude Parallel Accounts
+### Moving from an earlier copy
 
-CPPO replaces Claude Parallel Accounts (`DercasDrol.claude-parallel-accounts` — this project's earlier name, and the original it was built from) under a new ID, `warrenb213.cppo`, so VS Code sees two extensions. Your accounts, providers, roles and history live in `~/.claude-*` and carry over; three things need care:
+CPPO has shipped under earlier extension IDs — **Claude Parallel Accounts** (`DercasDrol.claude-parallel-accounts`: this project's earlier name, and the original it was built from) and **CPPO from publisher `warrenb213`** (`warrenb213.cppo`, 1.16.0–1.16.1). VS Code sees each ID as a separate extension. Your accounts, providers, roles and history live in `~/.claude-*` and carry over; three things need care:
 
-1. **Update the old extension to 1.15.3 first** (from [CPPO's releases](https://github.com/warrenb213/cppo/releases/tag/v1.15.3)), then install CPPO, then uninstall the old one. Earlier versions of the old extension don't know CPPO, and **their uninstaller deletes the account folders and history CPPO uses**; 1.15.3 steps aside while CPPO is installed and its uninstaller leaves everything in place. If CPPO finds an older copy, it stays idle and says so.
-2. **Provider keys:** VS Code keeps secrets per extension, so CPPO can't read the old one's. It recovers the keys a window's settings still hold (gateways such as Z.ai, Anthropic API keys) and asks once for the rest (keys behind the local proxy, OpenAI API keys). Codex on a ChatGPT plan needs nothing: it's Codex's own sign-in.
-3. **Each window's provider** is recognised from the window's settings; the workers server is now named `cppo` (tools `mcp__cppo__…`), and the old one's entry is removed from each window's Claude Code config. New Claude Code sessions pick it up.
+1. **Update the old copy to its bridge release first, then install CPPO, then uninstall the old copy.** Older versions don't know the new ID, and **their uninstaller deletes the account folders and history CPPO uses**. The bridges step aside while a newer copy is installed and their uninstallers leave everything in place:
+
+   | You have | Install first |
+   | --- | --- |
+   | Claude Parallel Accounts (any version) | [`claude-parallel-accounts-1.15.4.vsix`](https://github.com/warrenb213/cppo/releases/tag/v1.15.4) |
+   | CPPO from `warrenb213` (1.16.0, 1.16.1) | [`cppo-1.16.2-warrenb213-bridge.vsix`](https://github.com/warrenb213/cppo/releases/tag/v1.16.2) |
+
+   If CPPO finds an older copy that isn't a bridge, it stays idle and says so. From here on every copy carries a mark that makes this automatic: the newest runs, older ones step aside, and no uninstaller removes data another copy uses.
+2. **Provider keys:** VS Code keeps secrets per extension, so CPPO can't read an older copy's. It recovers the keys a window's settings still hold (gateways such as Z.ai, Anthropic API keys) and asks once for the rest (keys behind the local proxy, OpenAI API keys). Codex on a ChatGPT plan needs nothing: it's Codex's own sign-in.
+3. **Each window's provider** is recognised from the window's settings; the workers server is named `cppo` (tools `mcp__cppo__…`), and Claude Parallel Accounts' old entry is removed from each window's Claude Code config. New Claude Code sessions pick it up.
 
 ---
 
@@ -440,7 +447,9 @@ scripts/render-diagrams.sh   # README diagrams: docs/diagrams/*.mmd → .png
 
 The README's diagrams are PNGs rendered from the Mermaid sources in `docs/diagrams/` — VS Code's extension page doesn't render Mermaid, and the packager refuses SVG images. Edit the `.mmd`, then run the script.
 
-**Releases** are [GitHub Releases](https://github.com/warrenb213/cppo/releases): a `v<version>` tag with `cppo-<version>.vsix` (built by `npm run package`) attached, and the version's `CHANGELOG.md` entry as its notes. They're made by hand — `gh release create v<version> cppo-<version>.vsix --notes-file …` — and installed by hand ([Install](#install)). CPPO is **never published to the Marketplace or Open VSX**: GitHub Actions are disabled on the repository, and the publish steps in the workflow files inherited from the original project ([`ci.yml`](.github/workflows/ci.yml), [`release.yml`](.github/workflows/release.yml)) only run in that project's repository.
+**Releases** are [GitHub Releases](https://github.com/warrenb213/cppo/releases): a `v<version>` tag with `cppo-<version>.vsix` (built by `npm run package`) attached, and the version's `CHANGELOG.md` entry as its notes. They're made by hand — `gh release create v<version> cppo-<version>.vsix --notes-file …` — and installed by hand ([Install](#install)). No workflow publishes anything: GitHub Actions are disabled on the repository, and the publish steps in the workflow files inherited from the original project ([`ci.yml`](.github/workflows/ci.yml), [`release.yml`](.github/workflows/release.yml)) only run in that project's repository.
+
+**Copies and generations.** `package.json` carries `"cppo": { "generation": N }` — 3 for `beboutit503.cppo`. Every copy with the mark knows the others whatever their ID (`src/copies.ts`, `uninstall.js`): the newest generation runs, older ones step aside, and an uninstaller keeps the shared data while another copy is installed. A future change of publisher or name bumps the generation. Bridge builds for an earlier ID are the same code under that ID: `scripts/package-variant.py <publisher> <name> "<display name>" <generation> <version> <out.vsix>`.
 
 ---
 

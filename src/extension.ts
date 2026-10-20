@@ -18,6 +18,7 @@ import { Transcripts } from './transcripts';
 import { allWorkingDirs, workingRoot } from './workdir';
 import { removeStrayLinks } from './litellm';
 import { log, showLog } from './log';
+import { blockedByUnmarked, otherCopies, ownGeneration, stepAside, suggestRemoving } from './copies';
 
 /**
  * Everything this extension does rests on Linux semantics that we verified:
@@ -74,67 +75,27 @@ function activateUnsupported(context: vscode.ExtensionContext): void {
   );
 }
 
-/** Where CPPO's releases are — the bridge release of the old extension is there too. */
-const RELEASES = 'https://github.com/warrenb213/cppo/releases';
-const OLD_ID = 'DercasDrol.claude-parallel-accounts';
-
-function versionBelow(v: string, min: string): boolean {
-  const a = v.split('.').map((x) => parseInt(x, 10) || 0);
-  const b = min.split('.').map((x) => parseInt(x, 10) || 0);
-  for (let i = 0; i < 3; i++) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) < (b[i] ?? 0);
-  return false;
-}
-
-/**
- * The old extension (this product's former name) at a version that doesn't know
- * CPPO: it runs too, and its uninstaller would delete the data CPPO uses. CPPO
- * does nothing until it's updated to the bridge release (1.15.3) and removed.
- */
-function activateBlockedByOld(context: vscode.ExtensionContext, version: string): void {
-  const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-  item.text = '$(warning) CPPO: remove Claude Parallel Accounts';
-  item.tooltip = `Claude Parallel Accounts ${version} is still installed. CPPO stays idle until it is updated to 1.15.3 and uninstalled.`;
-  item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
-  item.show();
-  context.subscriptions.push(item);
-  log(`CPPO idle: Claude Parallel Accounts ${version} is installed`);
-  void vscode.window
-    .showWarningMessage(
-      `Claude Parallel Accounts ${version} — CPPO's old name — is still installed, so CPPO stays idle (both would claim this ` +
-        `window's account). Don't just uninstall it: that version's uninstaller deletes the accounts and history CPPO uses. ` +
-        `Install its final 1.15.3 from the CPPO releases first — it steps aside and leaves your data alone when removed — ` +
-        `then uninstall it and reload.`,
-      { modal: true },
-      'Open releases'
-    )
-    .then((pick) => {
-      if (pick) void vscode.env.openExternal(vscode.Uri.parse(RELEASES));
-    });
-}
-
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   if (process.platform !== 'linux') {
     activateUnsupported(context);
     return;
   }
-  // The same product under its old name. From 1.15.3 it steps aside when CPPO is
-  // installed; before that it would run too — and its uninstaller delete our data.
-  const old = vscode.extensions.getExtension(OLD_ID);
-  if (old) {
-    const v = String((old.packageJSON as { version?: unknown } | undefined)?.version ?? '0');
-    if (versionBelow(v, '1.15.3')) {
-      activateBlockedByOld(context, v);
-      return;
-    }
-    void vscode.window
-      .showInformationMessage(
-        `CPPO has replaced Claude Parallel Accounts, which is still installed (doing nothing). Uninstall it — version ${v} leaves your accounts and history in place.`,
-        'Show it'
-      )
-      .then((pick) => {
-        if (pick) void vscode.commands.executeCommand('workbench.extensions.search', '@installed claude parallel accounts');
-      });
+  // Other copies of this product (earlier names and publishers, same data): the
+  // newest generation runs; see copies.ts.
+  const mine = ownGeneration(context);
+  const others = otherCopies(context);
+  const newer = others.filter((c) => c.generation > mine).sort((x, y) => y.generation - x.generation)[0];
+  if (newer) {
+    stepAside(context, newer);
+    return;
   }
+  const older = others.filter((c) => c.generation < mine || (c.generation === mine && c.id.toLowerCase() !== context.extension.id.toLowerCase()));
+  const unsafe = older.filter((c) => !c.marked);
+  if (unsafe.length) {
+    blockedByUnmarked(context, unsafe);
+    return;
+  }
+  if (older.length) suggestRemoving(older);
 
   // Accounts, the repo map and the last-used account describe THIS host's disk,
   // so they live on it — not in globalState, which VSCode shares across every
