@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## 1.17.1 — 2026-10-21
+
+### Fixed
+
+- **A Codex provider rode on whichever ChatGPT account Codex was signed in as on the host.** Providers are saved per Claude account, but Codex keeps one sign-in per Linux user (`~/.codex`), so a work account's new Codex provider silently used the personal ChatGPT sign-in — no sign-in prompt, work content going to a personal plan. Now:
+  - a new ChatGPT-plan provider gets **a sign-in of its own** (a Codex home per provider, `~/.claude-windows/codex/<id>`) and is prompted to sign in (`codex login`, `--device-auth` in remote windows); using the host's `~/.codex` sign-in is an explicit choice that names the account Codex is signed in as and who else uses it;
+  - providers from earlier versions keep working as before, but if Claude accounts of more than one email share the host sign-in, CPPO says so once and offers each its own (*Give it its own sign-in* / *Keep sharing*), never switching anything by itself; *Edit or Remove a Provider* switches either way;
+  - removing a provider deletes its own sign-in.
+- **The terms warning fired too widely** — a work account's new OpenAI provider warned about a *personal* account's. It now counts only providers in the same Claude account, treats two Codex providers on one host sign-in as the one ChatGPT account they are, and says "account" for a ChatGPT sign-in and "key" for keys.
+
+### Changed
 
 - README: a notice that CPPO is a personal project and that personal and work accounts, keys and code shouldn't be mixed on one machine; a matching note under *Terms of service*.
 

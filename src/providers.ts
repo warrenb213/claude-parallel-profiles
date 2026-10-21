@@ -20,6 +20,7 @@ import {
   codexBinary,
   CodexContext,
   CodexModel,
+  codexAccount,
   codexCapabilities,
   codexModels,
   keyCodexHome,
@@ -82,6 +83,13 @@ export interface Provider {
   kind?: 'anthropic' | 'codex';
   /** Codex only: its ChatGPT plan (Codex's own sign-in) or an OpenAI API key. */
   codexAuth?: CodexAuth;
+  /**
+   * Codex ChatGPT plan only: whose sign-in it uses. 'own': a Codex home of its own
+   * (~/.claude-windows/codex/<id>), signed in for this provider alone. 'shared':
+   * this host's Codex sign-in (~/.codex) — one per Linux user, whatever Claude
+   * account asks. Unset (providers from before 1.17.1): shared.
+   */
+  codexHome?: 'own' | 'shared';
   /** Codex only: the models it offers, from its `model/list`. */
   codexModels?: CodexModel[];
   /** Codex only: the account can generate images (`modelProvider/capabilities/read`). */
@@ -123,6 +131,8 @@ const legacySecretKey = (id: string) => `claudeProfiles.provider.${id}`;
 const ANTHROPIC_API = 'https://api.anthropic.com';
 const isNative = (p: Provider) => p.kind === 'anthropic';
 const isCodex = (p: Provider) => p.kind === 'codex';
+/** A Codex ChatGPT-plan provider on this host's own Codex sign-in (~/.codex) — shared with every Claude account here. */
+const sharesUserCodex = (p: Provider) => isCodex(p) && p.codexAuth !== 'api-key' && p.codexHome !== 'own';
 
 /** A Codex provider that can serve a chat window: an API key (a ChatGPT plan is Codex's own — workers only). */
 const chatCapable = (p: Provider) => !isCodex(p) || p.codexAuth === 'api-key';
@@ -157,7 +167,7 @@ function describeKind(p: Provider): string {
   if (isCodex(p)) {
     return p.codexAuth === 'api-key'
       ? `OpenAI Codex · API key · workers${p.extraModels?.length ? ' + chat windows' : ''}`
-      : 'OpenAI Codex · ChatGPT plan · workers';
+      : `OpenAI Codex · ChatGPT plan · ${sharesUserCodex(p) ? "host's shared sign-in" : 'own sign-in'} · workers`;
   }
   return p.preset ? PRESETS[p.preset].label : p.baseUrl;
 }
@@ -869,7 +879,9 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
       if (!key) return undefined;
       return { bin, home: keyCodexHome(workingRoot(), p.id), env: { CODEX_API_KEY: key }, auth: 'api-key', efforts };
     }
-    return { bin, home: userCodexHome(), env: {}, auth: 'chatgpt', efforts };
+    // A ChatGPT plan: its own sign-in, or — only where the user chose it — this host's.
+    const own = !sharesUserCodex(p);
+    return { bin, home: own ? keyCodexHome(workingRoot(), p.id) : userCodexHome(), env: {}, auth: 'chatgpt', efforts, own };
   }
 
   /**
@@ -1537,26 +1549,26 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
   }
 
   /**
-   * Before adding a provider: if this host already has one of the same service —
-   * for this account or another — say plainly that several accounts or keys with
-   * one service, used to get around its limits, can break its terms. The user
-   * decides; separate accounts for separate purposes (personal, an employer's)
-   * are a normal reason. False if they cancel.
+   * Before adding a provider: if THIS Claude account already has one of the same
+   * service, say plainly that several accounts or keys with one service, used to
+   * get around its limits, can break its terms. Other Claude accounts on the host
+   * don't count — a work account and a personal one are separate purposes. Two
+   * Codex providers on the same host sign-in are one ChatGPT account, not two.
+   * The user decides. False if they cancel.
    */
   private async termsCheck(p: Provider): Promise<boolean> {
     const svc = serviceOf(p);
-    const all = this.state.get<Record<string, Provider[]>>('claudeProfiles.providers', {});
-    const existing = Object.entries(all).flatMap(([email, list]) =>
-      list.filter((x) => x.id !== p.id && serviceOf(x).key === svc.key).map((x) => `"${x.name}" (${email})`)
+    const existing = this.list().filter(
+      (x) => x.id !== p.id && serviceOf(x).key === svc.key && !(sharesUserCodex(p) && sharesUserCodex(x))
     );
     if (existing.length === 0) return true;
-    log(`provider: second ${svc.label} on this host (already: ${existing.join(', ')}) — terms warning shown`);
+    const what = isCodex(p) && p.codexAuth !== 'api-key' ? 'ChatGPT account' : 'key';
+    log(`provider: another ${svc.label} ${what} in this Claude account (already: ${existing.map((x) => x.name).join(', ')}) — terms warning shown`);
     const ok = await vscode.window.showWarningMessage(
-      `This host already has ${svc.label} set up: ${existing.join(', ')}.\n\n` +
-        `Using more than one ${svc.label} account or key — for example, to get around a plan's usage limits — ` +
+      `This Claude account already has ${svc.label}: ${existing.map((x) => `"${x.name}"`).join(', ')}.\n\n` +
+        `Using more than one ${svc.label} ${what} — for example, to get around a plan's usage limits — ` +
         `may break ${svc.label}'s terms of service. This extension doesn't check or work around anyone's terms; ` +
-        `make sure what you're doing is allowed (separate accounts for separate purposes, such as personal and ` +
-        `an employer's, are the usual reason).`,
+        `make sure what you're doing is allowed.`,
       { modal: true },
       'Add it anyway'
     );
@@ -1603,14 +1615,43 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
             auth: 'api-key' as CodexAuth,
           },
         ],
-        { title: 'Add OpenAI Codex (1/2): how Codex signs in' }
+        { title: 'Add OpenAI Codex: how Codex signs in' }
       )
     )?.auth;
     if (!auth) return;
+    // A ChatGPT plan is whichever account Codex is signed in as. Its default here is a sign-in of this
+    // provider's own: this host has ONE Codex sign-in (~/.codex), shared by every Claude account on it,
+    // and a work account's provider must not quietly ride on a personal one (or the reverse).
+    let home: 'own' | 'shared' | undefined;
+    if (auth === 'chatgpt') {
+      const host = await this.sharedCodexInfo();
+      home = (
+        await vscode.window.showQuickPick(
+          [
+            {
+              label: '$(shield) Its own sign-in (recommended)',
+              description: 'a separate ChatGPT sign-in, for this provider alone',
+              detail: "Nothing is shared with other Claude accounts on this host. You'll sign in to the ChatGPT account you want to use here.",
+              home: 'own' as const,
+            },
+            {
+              label: "$(account) This host's Codex sign-in",
+              description: host.who ? `signed in as ${host.who}` : 'not signed in on this host',
+              detail:
+                `The sign-in in ~/.codex, shared with every Claude account on this host` +
+                `${host.users.length ? ` (also used by ${host.users.join(', ')})` : ''}. Choose it only if that ChatGPT account is the one you mean to use here.`,
+              home: 'shared' as const,
+            },
+          ],
+          { title: 'Add OpenAI Codex: whose ChatGPT sign-in?' }
+        )
+      )?.home;
+      if (!home) return;
+    }
     const taken = (v: string) => this.list().some((p) => p.name === v.trim());
     const suggested = auth === 'chatgpt' ? 'Codex' : 'Codex (API key)';
     const name = await vscode.window.showInputBox({
-      title: 'Add OpenAI Codex (2/2): name',
+      title: 'Add OpenAI Codex: name',
       prompt: "How workers on it are named (e.g. codex/gpt-6.1-sol) and shown in the account's hover",
       value: taken(suggested) ? '' : suggested,
       validateInput: (v) => (!v.trim() ? 'Enter a name' : taken(v) ? 'That name is taken' : undefined),
@@ -1629,7 +1670,7 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
       )?.trim();
       if (!key) return;
     }
-    let provider: Provider = { id: crypto.randomBytes(6).toString('hex'), name: name.trim(), kind: 'codex', codexAuth: auth, baseUrl: '', auth: 'bearer' };
+    let provider: Provider = { id: crypto.randomBytes(6).toString('hex'), name: name.trim(), kind: 'codex', codexAuth: auth, ...(home && { codexHome: home }), baseUrl: '', auth: 'bearer' };
     if (!(await this.termsCheck(provider))) return;
     if (key) await this.context.secrets.store(this.secretKey(provider.id), key);
     await this.save([...this.list(), provider]);
@@ -1653,6 +1694,58 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
     // An API key can also serve chat windows, through the local proxy.
     const pick = await vscode.window.showInformationMessage(`${done} It can also run Claude Code chat windows on GPT.`, 'Set up chat windows');
     if (pick) await this.useInWindow(updated);
+  }
+
+  /** Who this host's own Codex (~/.codex) is signed in as, and which providers — in any Claude account — use it. */
+  private async sharedCodexInfo(): Promise<{ who?: string; users: string[] }> {
+    const all = this.state.get<Record<string, Provider[]>>('claudeProfiles.providers', {});
+    const users = Object.entries(all).flatMap(([email, list]) => list.filter(sharesUserCodex).map((x) => `"${x.name}" (${email})`));
+    const bin = await codexBinary();
+    const a = bin ? await codexAccount({ bin, home: userCodexHome(), env: {}, auth: 'chatgpt' }) : undefined;
+    return { who: a?.type === 'chatgpt' ? `${a.email ?? 'a ChatGPT account'}${a.plan ? ` (${a.plan})` : ''}` : undefined, users };
+  }
+
+  /** Switches a Codex ChatGPT provider between its own sign-in and this host's, then checks it (a sign-in prompt when signed out). */
+  private async setCodexHome(p: Provider, mode: 'own' | 'shared'): Promise<void> {
+    const updated: Provider = { ...p, codexHome: mode };
+    await this.save(this.list().map((x) => (x.id === p.id ? updated : x)));
+    const ack = this.state.get<Record<string, boolean>>('claudeProfiles.codexSharedAck', {});
+    if (mode === 'shared') ack[p.id] = true;
+    else delete ack[p.id];
+    await this.state.update('claudeProfiles.codexSharedAck', ack);
+    // Leaving a sign-in of its own behind would leave a token nobody uses.
+    if (mode === 'shared') fs.rmSync(path.join(workingRoot(), 'codex', p.id), { recursive: true, force: true });
+    log(`provider ${p.name}: Codex sign-in is now ${mode === 'own' ? 'its own' : "this host's (~/.codex)"}`);
+    this.onDidChange.fire();
+    await this.checkCodex(updated);
+  }
+
+  /**
+   * Providers made before 1.17.1 all ride on this host's one Codex sign-in. When
+   * Claude accounts of more than one email do — a work account's and a personal
+   * one's on the same Linux user — say so, and offer each its own. Never changes
+   * anything by itself. Asked again next start unless the user keeps sharing.
+   */
+  async noticeSharedCodex(): Promise<void> {
+    const all = this.state.get<Record<string, Provider[]>>('claudeProfiles.providers', {});
+    const shared = Object.entries(all).flatMap(([email, list]) => list.filter(sharesUserCodex).map((p) => ({ p, email })));
+    if (new Set(shared.map((s) => s.email)).size < 2) return;
+    const ack = this.state.get<Record<string, boolean>>('claudeProfiles.codexSharedAck', {});
+    for (const p of this.list().filter((x) => sharesUserCodex(x) && !ack[x.id])) {
+      const others = shared.filter((s) => s.email !== this.email()).map((s) => `"${s.p.name}" (${s.email})`);
+      const pick = await vscode.window.showWarningMessage(
+        `${p.name} uses this host's one Codex sign-in, which ${others.join(', ')} — under another Claude account — uses too. ` +
+          `That's whichever ChatGPT account Codex is signed in as, for every Claude account on this host. If these are meant to be ` +
+          `different accounts (a work one and a personal one), give ${p.name} its own sign-in.`,
+        'Give it its own sign-in',
+        'Keep sharing'
+      );
+      if (pick === 'Give it its own sign-in') await this.setCodexHome(p, 'own');
+      else if (pick === 'Keep sharing') {
+        ack[p.id] = true;
+        await this.state.update('claudeProfiles.codexSharedAck', ack);
+      }
+    }
   }
 
   /**
@@ -1972,7 +2065,7 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
     const target = chosen.provider;
     if (!target) return;
 
-    type Action = 'test' | 'workers' | 'key' | 'url' | 'auth' | 'models' | 'others' | 'refresh' | 'proxylog' | 'betas' | 'rename' | 'remove' | 'signin' | 'codexmodels' | 'chatmodels';
+    type Action = 'test' | 'workers' | 'key' | 'url' | 'auth' | 'models' | 'others' | 'refresh' | 'proxylog' | 'betas' | 'rename' | 'remove' | 'signin' | 'codexmodels' | 'chatmodels' | 'codexhome';
     type ActionItem = vscode.QuickPickItem & { action: Action };
     const common = (items: ActionItem[]): ActionItem[] => [
       { label: '$(pulse) Test connection', description: 'one tiny request, as Claude Code sends it', action: 'test' },
@@ -2018,7 +2111,12 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
                     ...(target.extraModels?.length ? [{ label: '$(output) Show proxy log', action: 'proxylog' as Action }] : []),
                     { label: '$(key) Replace key', action: 'key' as Action },
                   ]
-                : [{ label: '$(account) Sign in to Codex', description: 'codex login, in a terminal', action: 'signin' as Action }]),
+                : [
+                    { label: '$(account) Sign in to Codex', description: sharesUserCodex(target) ? "this host's sign-in (~/.codex)" : 'its own sign-in', action: 'signin' as Action },
+                    sharesUserCodex(target)
+                      ? { label: '$(shield) Give it its own sign-in', description: 'stop using the sign-in shared with other Claude accounts', action: 'codexhome' as Action }
+                      : { label: "$(account) Use this host's Codex sign-in instead", description: '~/.codex, shared with every Claude account here', action: 'codexhome' as Action },
+                  ]),
               { label: '$(edit) Rename', action: 'rename' },
               { label: '$(trash) Remove', action: 'remove' },
             ]
@@ -2088,6 +2186,28 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
       case 'signin':
         await this.checkCodex(target);
         return;
+      case 'codexhome': {
+        if (sharesUserCodex(target)) {
+          const ok = await vscode.window.showWarningMessage(
+            `Give ${target.name} its own Codex sign-in?\n\nIt will stop using this host's Codex sign-in (~/.codex) and ask you to sign in ` +
+              `to the ChatGPT account you want for it. Other providers on the host's sign-in are unaffected.`,
+            { modal: true },
+            'Give it its own sign-in'
+          );
+          if (ok === 'Give it its own sign-in') await this.setCodexHome(target, 'own');
+          return;
+        }
+        const host = await this.sharedCodexInfo();
+        const ok = await vscode.window.showWarningMessage(
+          `Use this host's Codex sign-in for ${target.name}?\n\n` +
+            `${host.who ? `Codex here is signed in as ${host.who}.` : 'Codex on this host is not signed in.'} It's shared with every Claude account ` +
+            `on this host${host.users.length ? ` (also used by ${host.users.join(', ')})` : ''}. ${target.name}'s own sign-in is removed.`,
+          { modal: true },
+          "Use this host's sign-in"
+        );
+        if (ok === "Use this host's sign-in") await this.setCodexHome(target, 'shared');
+        return;
+      }
       case 'chatmodels': {
         const picked = await this.pickChatModels(target);
         if (!picked) return;
@@ -2248,8 +2368,8 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
         await this.save(this.list().filter((p) => p.id !== target.id));
         await this.context.secrets.delete(this.secretKey(target.id));
         await stopProxy(target.id);
-        if (isCodex(target) && target.codexAuth === 'api-key') {
-          fs.rmSync(path.join(workingRoot(), 'codex', target.id), { recursive: true, force: true });
+        if (isCodex(target) && !sharesUserCodex(target)) {
+          fs.rmSync(path.join(workingRoot(), 'codex', target.id), { recursive: true, force: true }); // its own sign-in or key: nothing left behind
         }
         log(`provider removed: ${target.name}`);
         // This window used it: back to the Anthropic login now. Other windows find

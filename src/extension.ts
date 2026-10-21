@@ -319,6 +319,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     await providers.sync();
     await workers.reconcile();
     void providers.promptMissingKeys();
+    void providers.noticeSharedCodex();
   });
   providers.warnAboutSharedOverride();
 

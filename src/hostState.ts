@@ -43,6 +43,8 @@ const KEYS = [
   'claudeProfiles.storesClassified',
   /** Roles and their fallback chains (roles.ts), by account email. */
   'claudeProfiles.roles',
+  /** Codex providers whose shared host sign-in the user already confirmed (by provider id). */
+  'claudeProfiles.codexSharedAck',
 ] as const;
 export type HostStateKey = (typeof KEYS)[number];
 

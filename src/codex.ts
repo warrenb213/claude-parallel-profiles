@@ -38,6 +38,8 @@ export interface CodexContext {
   auth: CodexAuth;
   /** Reasoning efforts by model, from `model/list`, to keep a requested effort within what a model takes. */
   efforts?: Record<string, string[]>;
+  /** A ChatGPT plan on a Codex home of this provider's own (not the host's shared ~/.codex). */
+  own?: boolean;
 }
 
 export interface CodexModel {
@@ -287,8 +289,14 @@ export async function testCodex(ctx: CodexContext, key?: string): Promise<CodexT
     if (a?.type === 'chatgpt') return { ok: true, detail: `signed in as ${a.email ?? 'a ChatGPT account'}${a.plan ? ` (${a.plan})` : ''}` };
     return {
       ok: false,
-      message: a ? `Codex is signed in with ${a.type === 'apiKey' ? 'an API key' : a.type}, not a ChatGPT plan.` : 'Codex is not signed in on this host.',
-      hint: 'Sign in with your ChatGPT account: run `codex login` (Sign in to Codex below opens a terminal for it).',
+      message: a
+        ? `Codex is signed in with ${a.type === 'apiKey' ? 'an API key' : a.type}, not a ChatGPT plan.`
+        : ctx.own
+          ? "This provider's own Codex sign-in isn't set up yet."
+          : "Codex isn't signed in on this host.",
+      hint: ctx.own
+        ? "Sign in to the ChatGPT account you want for this provider (Sign in to Codex below opens a terminal for it). It's separate from other providers' and from ~/.codex."
+        : 'Sign in with your ChatGPT account: run `codex login` (Sign in to Codex below opens a terminal for it).',
     };
   }
   try {
