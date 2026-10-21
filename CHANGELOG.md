@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.18.1 — 2026-10-21
+
+### Changed
+
+- **README: CPPO is on the VS Code Marketplace** ([`BeboutItSolutions.cppo`](https://marketplace.visualstudio.com/items?itemName=BeboutItSolutions.cppo)), so installing is no longer manual-only: the Install section leads with the Extensions view / `code --install-extension BeboutItSolutions.cppo`, with the `.vsix` from GitHub Releases as the alternative (offline hosts, builds of your own); updates come through VS Code; Marketplace and install badges; the release process and the platform note (one universal package, offered everywhere, inert off Linux) say so. The Marketplace shows the README packaged in the extension, hence this release.
+
 ## 1.18.0 — 2026-10-21
 
 ### Changed
