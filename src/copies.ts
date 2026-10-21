@@ -2,9 +2,10 @@ import * as vscode from 'vscode';
 
 /**
  * Other installed copies of this product — the same code and the same data
- * (~/.claude-*) under another extension ID. It has had three:
+ * (~/.claude-*) under another extension ID. It has had four:
  * Claude Parallel Accounts (DercasDrol.claude-parallel-accounts), CPPO as
- * warrenb213.cppo, and CPPO as beboutit503.cppo.
+ * warrenb213.cppo, CPPO as beboutit503.cppo (generation 3) and CPPO as
+ * BeboutItSolutions.cppo (generation 4).
  *
  * Each build says which copy it is with a mark in its package.json:
  * `"cppo": { "generation": N }`. With it, a copy knows the others whatever their

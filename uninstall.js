@@ -84,7 +84,7 @@ const outOfTime = () => Date.now() > deadline;
  * IDs it had before the mark existed. Either installed means the data is still
  * in use — by it.
  */
-const KNOWN_PREFIXES = ['dercasdrol.claude-parallel-accounts-', 'warrenb213.cppo-', 'beboutit503.cppo-'];
+const KNOWN_PREFIXES = ['dercasdrol.claude-parallel-accounts-', 'warrenb213.cppo-', 'beboutit503.cppo-', 'beboutitsolutions.cppo-'];
 
 function isCopy(dir, name) {
   if (KNOWN_PREFIXES.some((p) => name.toLowerCase().startsWith(p))) return true;

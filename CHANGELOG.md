@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.18.0 — 2026-10-21
+
+### Changed
+
+- **Publisher `BeboutItSolutions`:** CPPO's extension ID is now `BeboutItSolutions.cppo` (it was `beboutit503.cppo`). The generation mark moves to 4, so an installed `beboutit503.cppo` 1.17.x steps aside on its own and — its uninstaller keeping shared data — can be uninstalled normally. Accounts, providers, roles and history carry over; provider keys are recovered from window settings or asked for once (VS Code keeps secrets per extension).
+
 ## 1.17.1 — 2026-10-21
 
 ### Fixed

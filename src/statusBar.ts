@@ -159,7 +159,7 @@ export class StatusBarManager implements vscode.Disposable {
     // No "Settings" link: the extension deliberately has none, and a gear that
     // opens an empty settings page is worse than no gear at all.
     const links = [
-      `[$(extensions) Extension](command:extension.open?${arg([selfId || 'beboutit503.cppo'])} "Open the extension page")`,
+      `[$(extensions) Extension](command:extension.open?${arg([selfId || 'BeboutItSolutions.cppo'])} "Open the extension page")`,
       `[$(output) Log](command:cppo.showLog "Show what this extension has been doing")`,
     ].join(' &nbsp;·&nbsp; ');
 
