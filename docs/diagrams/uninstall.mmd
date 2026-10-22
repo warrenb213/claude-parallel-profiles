@@ -1,10 +1,12 @@
 flowchart LR
-  start["VS Code runs the uninstall hook"] --> other{"Another copy of the extension<br/>installed, or can't tell?"}
-  other -- "yes" --> stop0["Do nothing"]
+  start["VS Code runs the uninstall hook<br/>(at the NEXT server start, not at Uninstall)"] --> lease{"CPPO ran on this host<br/>in the last 30 days<br/>(usage lease)?"}
+  lease -- "yes" --> stop0["Do nothing:<br/>the data is in use"]
+  lease -- "no" --> other{"Another copy of the extension<br/>installed, or can't tell?"}
+  other -- "yes" --> stop0
   other -- "no" --> proxies["Stop LiteLLM proxies"]
   proxies --> acct["~/.claude: sign in as the account<br/>with the newest token"]
   acct --> hist["Move the shared history into ~/.claude<br/>and fold in what any account kept to itself"]
   hist --> ok{"Everything moved?"}
   ok -- "no" --> keep["Wipe stray tokens,<br/>keep its folders so no history is lost"]
-  ok -- "yes" --> rm["Delete the account stores it created,<br/>~/.claude-windows (working copies, state,<br/>proxy, agent tasks) and ~/.claude-shared"]
+  ok -- "yes" --> rm["Delete the account stores it created,<br/>~/.claude-windows (working copies, state,<br/>proxy, agent tasks), ~/.claude-shared<br/>and ~/.config/cppo (lease, state backup)"]
   rm --> adopted["Adopted stores: keep their login and files,<br/>remove only its history links"]

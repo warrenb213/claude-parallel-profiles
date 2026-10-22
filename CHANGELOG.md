@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.18.2 — 2026-10-22
+
+### Fixed
+
+- **A stale uninstall script wiped a host's saved state.** VS Code runs an uninstalled extension's script at the next *server* start, not at Uninstall. On one host, three copies uninstalled days earlier (`DercasDrol.claude-parallel-accounts` 1.15.3, `warrenb213.cppo` 1.16.2, `beboutit503.cppo` 1.17.1) had their scripts run together after a reboot; the 1.15.3 one only knew two extension IDs, found no other copy beside `BeboutItSolutions.cppo`, and ran its full cleanup — deleting the state file (every provider record, roles, the host ID that names stored keys), the account stores and the window copies (conversation history was moved to `~/.claude` first and survived; one account's login was handed back, the other's lost). Now:
+  - **A usage lease** (`~/.config/cppo/in-use`, refreshed hourly while CPPO runs, under any extension ID): the uninstall script touches nothing while the lease is under 30 days old — whatever other copies it does or doesn't recognise. A deliberate uninstall therefore leaves CPPO's data in place until CPPO has been unused for 30 days (the README says how to clean up sooner).
+  - **A state backup** (`~/.config/cppo/state.backup.json`: providers, roles, accounts, host ID; no secrets), outside everything older scripts remove. If the main state file is missing, corrupt or unreadable, CPPO restores from the backup (self-healing on the next write) and tells you. The one-time migration no longer runs when a backup exists, and a missing backup is created at start.
+  - **Reuse of orphaned Codex sign-ins:** adding a Codex provider with its own sign-in offers any sign-in folder on the host that no provider points at any more, showing the ChatGPT account it belongs to, before asking you to sign in again.
+- README: the uninstall timing, the lease and its 30-day consequence, the `~/.config/cppo` files, and why uninstalled-but-pending old copies are dangerous.
+
 ## 1.18.1 — 2026-10-21
 
 ### Changed

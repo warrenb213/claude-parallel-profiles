@@ -17,7 +17,7 @@
 //      best-effort by construction, and nothing may depend on it for correctness.
 //
 // The contract, in priority order — earlier goals are never sacrificed for later ones:
-//   a. Never destroy a live install's data.          (the guard)
+//   a. Never destroy a live install's data.          (installed-copy guard + recent usage lease)
 //   b. Never lose history.                           (deadline + no destructive step before its data is safe)
 //   c. Leave Claude Code signed in and working.      (hand the account back first)
 //   d. Leave no OAuth token behind.                  (tokens go even when (b) forces us to stop early)
@@ -33,6 +33,18 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+
+const LEASE_DAYS = 30;
+
+function leaseFresh() {
+  try {
+    // This path logic must stay in sync with src/lease.ts.
+    const file = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'cppo', 'in-use');
+    return Date.now() - fs.statSync(file).mtimeMs < LEASE_DAYS * 24 * 60 * 60 * 1000;
+  } catch {
+    return false;
+  }
+}
 
 /** Kept in sync with SHARED_DIRS + SHARED_FILES in src/sharedHistory.ts. */
 const SHARED_DIRS = [
@@ -424,6 +436,10 @@ function main() {
   // to do.
   if (os.platform() !== 'linux') return;
 
+  // Some CPPO, under any extension ID, ran on this host recently. Its data is
+  // in use, so a deferred uninstall must touch nothing.
+  if (leaseFresh()) return;
+
   // A newer copy is live and this data is now ITS data. Touch nothing.
   if (anotherCopyInstalled()) return;
 
@@ -467,7 +483,7 @@ function main() {
   //    so the store's content is never at risk here). A short-lived earlier
   //    version also kept token copies in ~/.claude-vault.
   for (const dir of adopted) unlinkSharedLinks(dir, store);
-  for (const dir of [...ours, workRoot, store, path.join(home, '.claude-vault')]) {
+  for (const dir of [...ours, workRoot, store, path.join(home, '.claude-vault'), path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'cppo')]) {
     try {
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {

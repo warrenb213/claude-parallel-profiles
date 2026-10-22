@@ -23,6 +23,7 @@ import {
   codexAccount,
   codexCapabilities,
   codexModels,
+  findOrphanCodexHomes,
   keyCodexHome,
   testCodex,
   userCodexHome,
@@ -1623,6 +1624,7 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
     // provider's own: this host has ONE Codex sign-in (~/.codex), shared by every Claude account on it,
     // and a work account's provider must not quietly ride on a personal one (or the reverse).
     let home: 'own' | 'shared' | undefined;
+    let orphan: { id: string; dir: string } | undefined;
     if (auth === 'chatgpt') {
       const host = await this.sharedCodexInfo();
       home = (
@@ -1647,6 +1649,36 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
         )
       )?.home;
       if (!home) return;
+      if (home === 'own') {
+        // State can be lost while Codex's sign-ins survive. Check every Claude
+        // account on this host so a provider that still exists is never offered.
+        const all = this.state.get<Record<string, Provider[]>>('claudeProfiles.providers', {});
+        const referenced = new Set(Object.values(all).flatMap((list) => list.map((p) => p.id)));
+        const orphans = findOrphanCodexHomes(workingRoot(), referenced);
+        if (orphans.length) {
+          const items = await vscode.window.withProgress(
+            { location: vscode.ProgressLocation.Notification, title: 'Looking for existing Codex sign-ins…' },
+            () => Promise.all(orphans.map(async (found) => {
+              const account = await codexAccount({ bin, home: found.dir, env: {}, auth: 'chatgpt' }).catch(() => undefined);
+              const who = account?.type === 'chatgpt' && account.email
+                ? `${account.email}${account.plan ? ` (${account.plan})` : ''}`
+                : 'signed-in account unknown';
+              return {
+                label: `$(account) ${who}`,
+                description: 'a sign-in left on this host by a provider that no longer exists',
+                detail: `Folder ${found.id}: this is the ChatGPT account it belongs to. Choose it only if it is the one you want for this Claude account.`,
+                orphan: found,
+              };
+            }))
+          );
+          const pick = await vscode.window.showQuickPick(
+            [...items, { label: '$(add) Sign in with a different ChatGPT account', description: '', detail: '', orphan: undefined }],
+            { title: 'Add OpenAI Codex: reuse a sign-in found on this host?' }
+          );
+          if (!pick) return;
+          orphan = pick.orphan;
+        }
+      }
     }
     const taken = (v: string) => this.list().some((p) => p.name === v.trim());
     const suggested = auth === 'chatgpt' ? 'Codex' : 'Codex (API key)';
@@ -1675,6 +1707,20 @@ export class ProviderManager implements vscode.Disposable, WorkerSource {
     if (key) await this.context.secrets.store(this.secretKey(provider.id), key);
     await this.save([...this.list(), provider]);
     log(`provider added: ${provider.name} (OpenAI Codex, ${auth}, ${bin})`);
+    if (orphan) {
+      const target = keyCodexHome(workingRoot(), provider.id);
+      try {
+        fs.rmdirSync(target); // keyCodexHome made an empty directory; move the whole sign-in into its place.
+        fs.renameSync(orphan.dir, target);
+      } catch {
+        // A move may fail across filesystems. Keep the original home intact.
+        fs.mkdirSync(target, { recursive: true, mode: 0o700 });
+        const authFile = path.join(target, 'auth.json');
+        fs.copyFileSync(path.join(orphan.dir, 'auth.json'), authFile);
+        fs.chmodSync(authFile, 0o600);
+      }
+      log(`provider ${provider.name}: reusing the Codex sign-in found in ${orphan.id}`);
+    }
     if (!(await this.checkCodex(provider))) return;
     provider = await this.refreshCodexModels(provider);
     const updated = await this.pickWorkers(provider);

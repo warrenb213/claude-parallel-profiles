@@ -9,7 +9,7 @@ import { SetupWizard, NOTICE_KEY } from './setupWizard';
 import { ensureSharedHistory } from './sharedHistory';
 import { defaultSourceDir } from './capture';
 import { AccountWatcher } from './accountWatcher';
-import { HostState } from './hostState';
+import { HostState, takeRecoveryNotice } from './hostState';
 import { describeLogin, ProviderManager } from './providers';
 import { OrchestrationPanel } from './orchestration';
 import { DelegateServer } from './delegate';
@@ -19,6 +19,7 @@ import { allWorkingDirs, workingRoot } from './workdir';
 import { removeStrayLinks } from './litellm';
 import { log, showLog } from './log';
 import { blockedByUnmarked, otherCopies, ownGeneration, stepAside, suggestRemoving } from './copies';
+import { startLease } from './lease';
 
 /**
  * Everything this extension does rests on Linux semantics that we verified:
@@ -96,6 +97,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return;
   }
   if (older.length) suggestRemoving(older);
+  startLease(context);
 
   // Accounts, the repo map and the last-used account describe THIS host's disk,
   // so they live on it — not in globalState, which VSCode shares across every
@@ -103,6 +105,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // globalState copy is synchronous: applyStored() below needs it in place.
   const state = new HostState();
   state.migrateFrom(context.globalState);
+  state.ensureBackup();
   const registry = new AccountRegistry(state);
   const binding = new WindowBinding(context, state);
   const wizard = new SetupWizard(registry, binding, context);
@@ -322,6 +325,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     void providers.noticeSharedCodex();
   });
   providers.warnAboutSharedOverride();
+
+  // The state file went missing or unreadable and was restored from its backup
+  // (hostState.ts): say so, since keys kept by VS Code may need entering again.
+  const recovered = takeRecoveryNotice();
+  if (recovered) void vscode.window.showWarningMessage(`CPPO: ${recovered}`);
 
   // An account handoff finishes with a reload, which kills any toast raised
   // before it — so the news of what happened is delivered here instead.

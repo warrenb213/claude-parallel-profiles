@@ -1,6 +1,7 @@
 import type * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import { hasCredentials } from './accounts';
 import { workingRoot } from './workdir';
 import { log } from './log';
@@ -54,13 +55,47 @@ function statePath(): string {
   return path.join(workingRoot(), '.state.json');
 }
 
+function backupPath(): string {
+  return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'cppo', 'state.backup.json');
+}
+
+let backupFailureLogged = false;
+let recoveryRecorded = false;
+let recoveryNotice: string | undefined;
+
+/** Returns a recovery message once, so callers can tell the user what happened. */
+export function takeRecoveryNotice(): string | undefined {
+  const notice = recoveryNotice;
+  recoveryNotice = undefined;
+  return notice;
+}
+
+function parseState(file: string): Partial<Record<HostStateKey, unknown>> {
+  const state: unknown = JSON.parse(fs.readFileSync(file, 'utf-8'));
+  if (!state || typeof state !== 'object' || Array.isArray(state)) {
+    throw new Error('Host state is not an object');
+  }
+  return state as Partial<Record<HostStateKey, unknown>>;
+}
+
 export class HostState {
   /** Read synchronously: activation binds the window before Claude Code starts. */
   private read(): Partial<Record<HostStateKey, unknown>> {
     try {
-      return JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as Partial<Record<HostStateKey, unknown>>;
-    } catch {
-      return {}; // not created yet, or unreadable — same as empty
+      return parseState(statePath());
+    } catch (err) {
+      const reason = (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unreadable';
+      try {
+        const state = parseState(backupPath());
+        if (!recoveryRecorded) {
+          recoveryRecorded = true;
+          recoveryNotice = `CPPO's saved state (providers, roles, accounts) was ${reason} on this host and was restored from its backup. If the extension's ID changed since, provider keys kept by VS Code may need to be entered again.`;
+          log(recoveryNotice);
+        }
+        return state;
+      } catch {
+        return {}; // neither copy is available — same as empty
+      }
     }
   }
 
@@ -69,8 +104,43 @@ export class HostState {
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     // Per-process temp name: several windows on this host can write at once.
     const tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
+    const json = JSON.stringify(state, null, 2);
+    fs.writeFileSync(tmp, json, { mode: 0o600 });
     fs.renameSync(tmp, file); // atomic: a reader never sees half a file
+    // Keep a second copy outside the tree old uninstall scripts remove.
+    try {
+      const backup = backupPath();
+      fs.mkdirSync(path.dirname(backup), { recursive: true, mode: 0o700 });
+      const backupTmp = `${backup}.${process.pid}.tmp`;
+      fs.writeFileSync(backupTmp, json, { mode: 0o600 });
+      fs.renameSync(backupTmp, backup);
+    } catch (err) {
+      if (!backupFailureLogged) {
+        backupFailureLogged = true;
+        log(`could not back up host state: ${(err as Error).message}`);
+      }
+    }
+  }
+
+  /**
+   * Makes sure the backup exists and isn't older than the main file. write() keeps
+   * it current, but a host that rarely writes (or whose state was last written by
+   * an older version, which made no backup) would otherwise have none when the
+   * main file is lost. Cheap: two stats at activation.
+   */
+  ensureBackup(): void {
+    try {
+      const main = fs.statSync(statePath());
+      let stale = true;
+      try {
+        stale = fs.statSync(backupPath()).mtimeMs < main.mtimeMs;
+      } catch {
+        /* no backup yet */
+      }
+      if (stale) this.write(this.read());
+    } catch {
+      /* no main file (nothing to back up), or unreadable — read() handles those */
+    }
   }
 
   get<T>(key: HostStateKey): T | undefined;
@@ -108,7 +178,7 @@ export class HostState {
    * it, and nothing here reads it again once the file exists.
    */
   migrateFrom(globalState: vscode.Memento): void {
-    if (fs.existsSync(statePath())) return;
+    if (fs.existsSync(statePath()) || fs.existsSync(backupPath())) return;
     const accounts = globalState
       .get<Entry[]>('claudeProfiles.accounts', [])
       .filter((a) => hasCredentials(a.dir));

@@ -132,6 +132,33 @@ export function keyCodexHome(root: string, providerId: string): string {
   return dir;
 }
 
+/**
+ * Losing the provider state can leave private Codex homes with live sign-ins
+ * behind. Offer those homes again, without reading the credentials themselves.
+ */
+export function findOrphanCodexHomes(root: string, referenced: ReadonlySet<string>): Array<{ id: string; dir: string }> {
+  const base = path.join(root, 'codex');
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(base, { withFileTypes: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw err;
+  }
+  const homes: Array<{ id: string; dir: string; mtime: number }> = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || referenced.has(entry.name)) continue;
+    const dir = path.join(base, entry.name);
+    try {
+      const auth = fs.lstatSync(path.join(dir, 'auth.json'));
+      if (auth.isFile()) homes.push({ id: entry.name, dir, mtime: auth.mtimeMs });
+    } catch {
+      /* no readable sign-in file, or the home disappeared */
+    }
+  }
+  return homes.sort((a, b) => b.mtime - a.mtime).map(({ id, dir }) => ({ id, dir }));
+}
+
 function runEnv(ctx: CodexContext): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   // Only this provider's credential: never a key the window or the shell happens to carry.
